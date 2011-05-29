@@ -65346,6 +65346,8 @@ int main()
         if (test__udivmodti4(tests[i][0], tests[i][1], tests[i][2], tests[i][3]))
             return 1;
 
+#else
+    printf("skipped\n");
 #endif
     return 0;
 }
