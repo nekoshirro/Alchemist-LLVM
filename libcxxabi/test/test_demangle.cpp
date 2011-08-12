@@ -29552,7 +29552,7 @@ const char* cases[][2] =
     {"_Z2f3IJiEEvDpPKT_", "void f3<int>(int const*)"},
     {"_Z2f3IJifEEvDpPKT_", "void f3<int, float>(int const*, float const*)"},
     {"_Z2f4IJifdEE5tupleIJDpT_EEv", "tuple<int, float, double> f4<int, float, double>()"},
-    {"_Z2f5IiJifdEE8identityIFT_DpT0_EEv", "identity<int ()(int, float, double)> f5<int, int, float, double>()"},
+    {"_Z2f5IiJifdEE8identityIFT_DpT0_EEv", "identity<int (int, float, double)> f5<int, int, float, double>()"},
     {"_Z2f6IJLi1ELi2ELi3EEE9int_tupleIJXspT_EEEv", "int_tuple<1, 2, 3> f6<1, 2, 3>()"},
     {"_Z2f7IJ8identity13add_referenceEE14template_tupleIJDpT_EEv", "template_tuple<identity, add_reference> f7<identity, add_reference>()"},
     {"_ZNK10__cxxabiv111__libcxxabi5__sub20first_demangled_nameEPc.eh", "__cxxabiv1::__libcxxabi::__sub::first_demangled_name(char*) const (.eh)"},
