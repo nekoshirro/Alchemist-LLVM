@@ -29575,7 +29575,7 @@ void test()
     for (unsigned i = 0; i < N; ++i)
     {
         int status;
-        char* demang = abi::__cxa_demangle(cases[i][0], buf, &len, &status);
+        char* demang = __cxxabiv1::__cxa_demangle(cases[i][0], buf, &len, &status);
         if (demang == 0 || std::strcmp(demang, cases[i][1]) != 0)
         {
             std::cout << cases[i][0] << " -> " << cases[i][1] << '\n';
