@@ -29568,6 +29568,7 @@ const char* cases[][2] =
     {"_ZZN4NIds4NStr14TCStrAggregateINS0_13TCTCStrTraitsINS0_11TCStrTraitsIcNS0_17CDefaultStrParamsEEENS0_14TCStrImp_FixedIS5_Lx256EEEEEE21f_AddFromIteratorUTF8INS0_16CStrIteratorUTF8EEEvRxRKT_ENKSA_ISB_EUlmE0_clEm", "void NIds::NStr::TCStrAggregate<NIds::NStr::TCTCStrTraits<NIds::NStr::TCStrTraits<char, NIds::NStr::CDefaultStrParams>, NIds::NStr::TCStrImp_Fixed<NIds::NStr::TCStrTraits<char, NIds::NStr::CDefaultStrParams>, 256ll> > >::f_AddFromIteratorUTF8<NIds::NStr::CStrIteratorUTF8>(long long&, NIds::NStr::CStrIteratorUTF8 const&)::NIds::NStr::TCStrAggregate<NIds::NStr::TCTCStrTraits<NIds::NStr::TCStrTraits<char, NIds::NStr::CDefaultStrParams>, NIds::NStr::TCStrImp_Fixed<NIds::NStr::TCStrTraits<char, NIds::NStr::CDefaultStrParams>, 256ll> > >::f_AddFromIteratorUTF8<NIds::NStr::CStrIteratorUTF8>::'lambda0'(unsigned long)::operator()(unsigned long) const"},
     {"_ZZN4NIds4NStr14TCStrAggregateINS0_13TCTCStrTraitsINS0_11TCStrTraitsIcNS0_17CDefaultStrParamsEEENS0_14TCStrImp_FixedIS5_Lx256EEEEEE21f_AddFromIteratorUTF8INS0_16CStrIteratorUTF8EEEvRxRKT_ENKSA_ISB_EUt0_clEm", "void NIds::NStr::TCStrAggregate<NIds::NStr::TCTCStrTraits<NIds::NStr::TCStrTraits<char, NIds::NStr::CDefaultStrParams>, NIds::NStr::TCStrImp_Fixed<NIds::NStr::TCStrTraits<char, NIds::NStr::CDefaultStrParams>, 256ll> > >::f_AddFromIteratorUTF8<NIds::NStr::CStrIteratorUTF8>(long long&, NIds::NStr::CStrIteratorUTF8 const&)::NIds::NStr::TCStrAggregate<NIds::NStr::TCTCStrTraits<NIds::NStr::TCStrTraits<char, NIds::NStr::CDefaultStrParams>, NIds::NStr::TCStrImp_Fixed<NIds::NStr::TCStrTraits<char, NIds::NStr::CDefaultStrParams>, 256ll> > >::f_AddFromIteratorUTF8<NIds::NStr::CStrIteratorUTF8>::'unnamed0'::operator()(unsigned long) const"},
     {"_ZNK3com9markzware2js11cJSArgumentcvRKT_I8cMyClassEEv", "com::markzware::js::cJSArgument::operator cMyClass const &<cMyClass>() const"},
+    {"_ZNKSt3__110__function6__funcIZN4DLCL8DLFutureIP15AnalysenManagerE3setINS_8functionIFS5_vEEEJEEEvT_DpOT0_EUlvE_NS_9allocatorISF_EEFvvEE7__cloneEv", "std::__1::__function::__func<void DLCL::DLFuture<AnalysenManager*>::set<std::__1::function<AnalysenManager* ()> >(std::__1::function<AnalysenManager* ()>)::'lambda'(), std::__1::allocator<void DLCL::DLFuture<AnalysenManager*>::set<std::__1::function<AnalysenManager* ()> >(std::__1::function<AnalysenManager* ()>)::'lambda'()>, void ()>::__clone() const"},
 };
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
@@ -29602,6 +29603,37 @@ void test()
     free(buf);
 }
 
+void test2()
+{
+    std::size_t len = 0;
+    char* buf = nullptr;
+    for (unsigned i = 0; i < N; ++i)
+    {
+        int status;
+        char* demang = __cxxabiv1::__cxa_demangle(cases[i][0], buf, &len, &status);
+        if (demang == 0 || std::strcmp(demang, cases[i][1]) != 0)
+        {
+            std::cout << cases[i][0] << " -> " << cases[i][1] << '\n';
+            if (demang)
+            {
+                std::cout << "Got instead: " << demang << '\n';
+                assert(std::strcmp(demang, cases[i][1]) == 0);
+            }
+            else
+            {
+                std::cout << "Got instead: NULL, " << status << '\n';
+                assert(demang != 0);
+            }
+        }
+        else
+        {
+            free(demang);
+            len = 0;
+        }
+    }
+    free(buf);
+}
+
 int main()
 {
     typedef std::chrono::high_resolution_clock Clock;
@@ -29620,7 +29652,6 @@ int main()
         int status;
         len = 0;
         char* demang = abi::__cxa_demangle(input.c_str(), 0, &len, &status);
-        Clock::time_point t1 = Clock::now();
         switch (status)
         {
         case -3:
