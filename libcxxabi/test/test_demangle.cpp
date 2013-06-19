@@ -29582,6 +29582,8 @@ const char* cases[][2] =
     {"_ZZN1S1fEiiEd0_NKUlvE_clEv", "S::f(int, int)::'lambda'()::operator()() const"},
     {"_Z3fooPM2ABi", "foo(int AB::**)"},
     {"_Z1rM1GFivEMS_KFivES_M1HFivES1_4whatIKS_E5what2IS8_ES3_", "r(int (G::*)(), int (G::*)() const, G, int (H::*)(), int (G::*)(), what<G const>, what2<G const>, int (G::*)() const)"},
+    {"_Z1fPU11objcproto1A11objc_object", "f(id<A>)"},
+    {"_Z1fPKU11objcproto1A7NSArray", "f(NSArray<A> const*)"},
 };
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
