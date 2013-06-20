@@ -29575,7 +29575,6 @@ const char* cases[][2] =
     {"_ZSteqIcEN9__gnu_cxx11__enable_ifIXsr9__is_charIT_EE7__valueEbE6__typeERKSbIS2_St11char_traitsIS2_ESaIS2_EESA_", "__gnu_cxx::__enable_if<__is_char<char>::__value, bool>::__type std::operator==<char>(std::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)"},
     {"_ZZ10+[Foo bar]E3Baz", "+[Foo bar]::Baz"},
     {"_ZN9__gnu_cxx17__normal_iteratorIPKSt4pairISsbESt6vectorIS2_SaIS2_EEEC5ERKS4_", "__gnu_cxx::__normal_iterator<std::pair<std::string, bool> const*, std::vector<std::pair<std::string, bool>, std::allocator<std::pair<std::string, bool> > > >::__normal_iterator(std::pair<std::string, bool> const* const&)"},
-    {"_ZNSt6vectorIN4llvm3sys2fs18directory_iteratorESaIS3_EE12emplace_backIIS3_EEEvDpOT_", "void std::vector<llvm::sys::fs::directory_iterator, std::allocator<llvm::sys::fs::directory_iterator> >::emplace_back<llvm::sys::fs::directory_iterator><>()"},
     {"_ZNSt16allocator_traitsISaIN4llvm3sys2fs18directory_iteratorEEE9constructIS3_IS3_EEEDTcl12_S_constructfp_fp0_spcl7forwardIT0_Efp1_EEERS4_PT_DpOS7_", "decltype(_S_construct(fpfp0forward<`T0_>(fp1))) std::allocator_traits<std::allocator<llvm::sys::fs::directory_iterator> >::construct<llvm::sys::fs::directory_iterator<llvm::sys::fs::directory_iterator> >(std::allocator<llvm::sys::fs::directory_iterator>&, llvm::sys::fs::directory_iterator<llvm::sys::fs::directory_iterator>*, llvm::sys::fs::directory_iterator<llvm::sys::fs::directory_iterator>&&)"},
     {"_Z1fIiEDTeqfp_LDnEEPT_", "decltype((fp) == (std::nullptr_t)) f<int>(int*)"},
     {"_Z1fIiEDTeqfp1_LDnEEicPT_", "decltype((fp1) == (std::nullptr_t)) f<int>(int, char, int*)"},
@@ -29587,6 +29586,13 @@ const char* cases[][2] =
 };
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
+
+const char* invalid_cases[] =
+{
+    "_ZIPPreEncode",
+};
+
+const unsigned NI = sizeof(invalid_cases) / sizeof(invalid_cases[0]);
 
 void test()
 {
@@ -29622,28 +29628,18 @@ void test2()
 {
     std::size_t len = 0;
     char* buf = nullptr;
-    for (unsigned i = 0; i < N; ++i)
+    for (unsigned i = 0; i < NI; ++i)
     {
         int status;
-        char* demang = __cxxabiv1::__cxa_demangle(cases[i][0], buf, &len, &status);
-        if (demang == 0 || std::strcmp(demang, cases[i][1]) != 0)
+        char* demang = __cxxabiv1::__cxa_demangle(invalid_cases[i], buf, &len, &status);
+        if (status != -2)
         {
-            std::cout << cases[i][0] << " -> " << cases[i][1] << '\n';
-            if (demang)
-            {
-                std::cout << "Got instead: " << demang << '\n';
-                assert(std::strcmp(demang, cases[i][1]) == 0);
-            }
-            else
-            {
-                std::cout << "Got instead: NULL, " << status << '\n';
-                assert(demang != 0);
-            }
+            std::cout << invalid_cases[i] << " should be invalid but is not\n" << " got status = " << status << '\n';
+            assert(status == -2);
         }
         else
         {
-            free(demang);
-            len = 0;
+            buf = demang;
         }
     }
     free(buf);
@@ -29655,6 +29651,7 @@ int main()
     typedef std::chrono::duration<double> sec;
     Clock::time_point t0 = Clock::now();
     test();
+    test2();
     Clock::time_point t1 = Clock::now();
     std::cout << sec(t1-t0).count() << " seconds for test\n";
     std::cout << N / sec(t1-t0).count() / 1000000. << " million symbols per second\n";
