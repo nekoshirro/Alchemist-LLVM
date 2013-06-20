@@ -29590,6 +29590,7 @@ const unsigned N = sizeof(cases) / sizeof(cases[0]);
 const char* invalid_cases[] =
 {
     "_ZIPPreEncode",
+    "Agentt",
 };
 
 const unsigned NI = sizeof(invalid_cases) / sizeof(invalid_cases[0]);
