@@ -29591,6 +29591,8 @@ const char* invalid_cases[] =
 {
     "_ZIPPreEncode",
     "Agentt",
+    "NSoERj5E=Y1[uM:ga",
+    "Aon_PmKVPDk7?fg4XP5smMUL6;<WsI_mgbf23cCgsHbT<l8EE\0uVRkNOoXDrgdA4[8IU>Vl<>IL8ayHpiVDDDXTY;^o9;i",
 };
 
 const unsigned NI = sizeof(invalid_cases) / sizeof(invalid_cases[0]);
