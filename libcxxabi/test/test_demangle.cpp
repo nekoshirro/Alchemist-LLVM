@@ -29582,6 +29582,7 @@ const char* cases[][2] =
     {"_Z1rM1GFivEMS_KFivES_M1HFivES1_4whatIKS_E5what2IS8_ES3_", "r(int (G::*)(), int (G::*)() const, G, int (H::*)(), int (G::*)(), what<G const>, what2<G const>, int (G::*)() const)"},
     {"_Z1fPU11objcproto1A11objc_object", "f(id<A>)"},
     {"_Z1fPKU11objcproto1A7NSArray", "f(NSArray<A> const*)"},
+    {"_ZNK1AIJ1Z1Y1XEEcv1BIJDpPT_EEIJS2_S1_S0_EEEv", "A<Z, Y, X>::operator B<X*, Y*, Z*><X, Y, Z>() const"},
 };
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
@@ -29592,7 +29593,6 @@ const char* invalid_cases[] =
     "Agentt",
     "NSoERj5E=Y1[uM:ga",
     "Aon_PmKVPDk7?fg4XP5smMUL6;<WsI_mgbf23cCgsHbT<l8EE\0uVRkNOoXDrgdA4[8IU>Vl<>IL8ayHpiVDDDXTY;^o9;i",
-    "_ZN8Blizza`d6Memory12voidp_returncvPT_IcEEv",
     "_ZNSt16allocator_traitsISaIN4llvm3sys2fs18directory_iteratorEEE9constructIS3_IS3_EEEDTcl12_S_constructfp_fp0_spcl7forwardIT0_Efp1_EEERS4_PT_DpOS7_",
 };
 
