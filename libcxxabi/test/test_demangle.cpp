@@ -29575,7 +29575,6 @@ const char* cases[][2] =
     {"_ZSteqIcEN9__gnu_cxx11__enable_ifIXsr9__is_charIT_EE7__valueEbE6__typeERKSbIS2_St11char_traitsIS2_ESaIS2_EESA_", "__gnu_cxx::__enable_if<__is_char<char>::__value, bool>::__type std::operator==<char>(std::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)"},
     {"_ZZ10+[Foo bar]E3Baz", "+[Foo bar]::Baz"},
     {"_ZN9__gnu_cxx17__normal_iteratorIPKSt4pairISsbESt6vectorIS2_SaIS2_EEEC5ERKS4_", "__gnu_cxx::__normal_iterator<std::pair<std::string, bool> const*, std::vector<std::pair<std::string, bool>, std::allocator<std::pair<std::string, bool> > > >::__normal_iterator(std::pair<std::string, bool> const* const&)"},
-    {"_ZNSt16allocator_traitsISaIN4llvm3sys2fs18directory_iteratorEEE9constructIS3_IS3_EEEDTcl12_S_constructfp_fp0_spcl7forwardIT0_Efp1_EEERS4_PT_DpOS7_", "decltype(_S_construct(fpfp0forward<`T0_>(fp1))) std::allocator_traits<std::allocator<llvm::sys::fs::directory_iterator> >::construct<llvm::sys::fs::directory_iterator<llvm::sys::fs::directory_iterator> >(std::allocator<llvm::sys::fs::directory_iterator>&, llvm::sys::fs::directory_iterator<llvm::sys::fs::directory_iterator>*, llvm::sys::fs::directory_iterator<llvm::sys::fs::directory_iterator>&&)"},
     {"_Z1fIiEDTeqfp_LDnEEPT_", "decltype((fp) == (std::nullptr_t)) f<int>(int*)"},
     {"_Z1fIiEDTeqfp1_LDnEEicPT_", "decltype((fp1) == (std::nullptr_t)) f<int>(int, char, int*)"},
     {"_ZZN1S1fEiiEd0_NKUlvE_clEv", "S::f(int, int)::'lambda'()::operator()() const"},
@@ -29594,6 +29593,7 @@ const char* invalid_cases[] =
     "NSoERj5E=Y1[uM:ga",
     "Aon_PmKVPDk7?fg4XP5smMUL6;<WsI_mgbf23cCgsHbT<l8EE\0uVRkNOoXDrgdA4[8IU>Vl<>IL8ayHpiVDDDXTY;^o9;i",
     "_ZN8Blizza`d6Memory12voidp_returncvPT_IcEEv",
+    "_ZNSt16allocator_traitsISaIN4llvm3sys2fs18directory_iteratorEEE9constructIS3_IS3_EEEDTcl12_S_constructfp_fp0_spcl7forwardIT0_Efp1_EEERS4_PT_DpOS7_",
 };
 
 const unsigned NI = sizeof(invalid_cases) / sizeof(invalid_cases[0]);
