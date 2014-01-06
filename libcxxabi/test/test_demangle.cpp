@@ -29584,6 +29584,7 @@ const char* cases[][2] =
     {"_Z1fPKU11objcproto1A7NSArray", "f(NSArray<A> const*)"},
     {"_ZNK1AIJ1Z1Y1XEEcv1BIJDpPT_EEIJS2_S1_S0_EEEv", "A<Z, Y, X>::operator B<X*, Y*, Z*><X, Y, Z>() const"},
     {"_ZNK3Ncr6Silver7Utility6detail12CallOnThreadIZ53-[DeploymentSetupController handleManualServerEntry:]E3$_5EclIJEEEDTclclL_ZNS2_4getTIS4_EERT_vEEspclsr3stdE7forwardIT_Efp_EEEDpOSA_", "decltype(-[DeploymentSetupController handleManualServerEntry:]::$_5& Ncr::Silver::Utility::detail::getT<-[DeploymentSetupController handleManualServerEntry:]::$_5>()()(std::forward<-[DeploymentSetupController handleManualServerEntry:]::$_5>(fp))) Ncr::Silver::Utility::detail::CallOnThread<-[DeploymentSetupController handleManualServerEntry:]::$_5>::operator()<>(-[DeploymentSetupController handleManualServerEntry:]::$_5&&) const"},
+    {"_Zli2_xy", "operator\"\" _x(unsigned long long)"},
 };
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
