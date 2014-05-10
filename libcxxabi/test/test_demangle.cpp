@@ -14,6 +14,9 @@
 #include <cassert>
 #include <chrono>
 
+// Is long double fp80?  (Only x87 extended double has 64-bit mantissa)
+#define LDBL_FP80 (__LDBL_MANT_DIG__ == 64)
+
 const char* cases[][2] =
 {
     {"_Z1A", "A"},
@@ -29513,7 +29516,9 @@ const char* cases[][2] =
     {"_ZN5test01fIiEEvT_RAszcl3ovlcvS1__EE_c", "void test0::f<int>(int, char (&) [sizeof (ovl((int)()))])"},
     {"_ZN5test01gIfEEvRAszplcvT__ELf40a00000E_c", "void test0::g<float>(char (&) [sizeof (((float)()) + (0x1.4p+2f))])"},
     {"_ZN5test01hIfEEvRAszplcvT__ELd4014000000000000E_c", "void test0::h<float>(char (&) [sizeof (((float)()) + (0x1.4p+2))])"},
+#if LDBL_FP80
     {"_ZN5test01hIfEEvRAcvjplstT_Le4001a000000000000000E_c", "void test0::h<float>(char (&) [(unsigned int)((sizeof (float)) + (0xap-1L))])"},
+#endif
     {"_ZN5test01jINS_1AEEEvRAszdtcvT__E6buffer_c", "void test0::j<test0::A>(char (&) [sizeof ((test0::A)().buffer)])"},
     {"_ZN5test11fINS_1XEiEEvT_IT0_E", "void test1::f<test1::X, int>(test1::X<int>)"},
     {"_ZN5test211read_memberINS_1AEEEDtptcvPT_Li0E6memberERS2_", "decltype((test2::A*)(0)->member) test2::read_member<test2::A>(test2::A&)"},
@@ -29597,6 +29602,9 @@ const char* invalid_cases[] =
     "NSoERj5E=Y1[uM:ga",
     "Aon_PmKVPDk7?fg4XP5smMUL6;<WsI_mgbf23cCgsHbT<l8EE\0uVRkNOoXDrgdA4[8IU>Vl<>IL8ayHpiVDDDXTY;^o9;i",
     "_ZNSt16allocator_traitsISaIN4llvm3sys2fs18directory_iteratorEEE9constructIS3_IS3_EEEDTcl12_S_constructfp_fp0_spcl7forwardIT0_Efp1_EEERS4_PT_DpOS7_",
+#if !LDBL_FP80
+    "_ZN5test01hIfEEvRAcvjplstT_Le4001a000000000000000E_c",
+#endif
 };
 
 const unsigned NI = sizeof(invalid_cases) / sizeof(invalid_cases[0]);
