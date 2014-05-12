@@ -24,6 +24,8 @@ const char* cases[][2] =
     {"_Z1A1B1C", "A(B, C)"},
     {"_Z4testI1A1BE1Cv", "C test<A, B>()"},
     {"_Z4testI1A1BET0_T_S3_", "B test<A, B>(A, A)"},
+    {"_ZN1SgtEi", "S::operator>(int)"},
+    {"_ZrsI1QEiT_i", "int operator>><Q>(Q, int)"},
     {"_ZN13dyldbootstrap5startEPK12macho_headeriPPKcl", "dyldbootstrap::start(macho_header const*, int, char const**, long)"},
     {"_ZN4dyld17getExecutablePathEv", "dyld::getExecutablePath()"},
     {"_ZN4dyld22mainExecutablePreboundEv", "dyld::mainExecutablePrebound()"},
