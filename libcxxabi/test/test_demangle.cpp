@@ -7,12 +7,12 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "support/timer.hpp"
 #include <iostream>
 #include <string>
 #include <cstdlib>
 #include <cxxabi.h>
 #include <cassert>
-#include <chrono>
 
 // Is long double fp80?  (Only x87 extended double has 64-bit mantissa)
 #define LDBL_FP80 (__LDBL_MANT_DIG__ == 64)
@@ -29664,14 +29664,12 @@ void test2()
 
 int main()
 {
-    typedef std::chrono::high_resolution_clock Clock;
-    typedef std::chrono::duration<double> sec;
-    Clock::time_point t0 = Clock::now();
-    test();
-    test2();
-    Clock::time_point t1 = Clock::now();
-    std::cout << sec(t1-t0).count() << " seconds for test\n";
-    std::cout << N / sec(t1-t0).count() / 1000000. << " million symbols per second\n";
+    std::cout << "Testing " << N << " symbols." << std::endl;
+    {
+        timer t;
+        test();
+        test2();
+    }
 #if 0
     std::string input;
     while (std::cin)
