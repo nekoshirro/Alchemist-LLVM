@@ -29594,6 +29594,8 @@ const char* cases[][2] =
     {"_Zli2_xy", "operator\"\" _x(unsigned long long)"},
     {"_Z1fIiEDcT_", "decltype(auto) f<int>(int)"},
     {"_ZZ4testvEN1g3fooE5Point", "test()::g::foo(Point)"},
+    {"_ZThn12_NSt9strstreamD0Ev",   "non-virtual thunk to std::strstream::~strstream()"},
+    {"_ZTv0_n12_NSt9strstreamD0Ev",     "virtual thunk to std::strstream::~strstream()"},
 };
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
