@@ -29516,11 +29516,6 @@ const char* cases[][2] =
     {"_ZN6PR58615AllocIcNS_6PolicyINS_1PELb1EEEE8allocateEiPKv", "PR5861::Alloc<char, PR5861::Policy<PR5861::P, true> >::allocate(int, void const*)"},
     {"_ZN5test01fIdEEvT_RAszcl3ovlcvS1__EE_c", "void test0::f<double>(double, char (&) [sizeof (ovl((double)()))])"},
     {"_ZN5test01fIiEEvT_RAszcl3ovlcvS1__EE_c", "void test0::f<int>(int, char (&) [sizeof (ovl((int)()))])"},
-    {"_ZN5test01gIfEEvRAszplcvT__ELf40a00000E_c", "void test0::g<float>(char (&) [sizeof (((float)()) + (0x1.4p+2f))])"},
-    {"_ZN5test01hIfEEvRAszplcvT__ELd4014000000000000E_c", "void test0::h<float>(char (&) [sizeof (((float)()) + (0x1.4p+2))])"},
-#if LDBL_FP80
-    {"_ZN5test01hIfEEvRAcvjplstT_Le4001a000000000000000E_c", "void test0::h<float>(char (&) [(unsigned int)((sizeof (float)) + (0xap-1L))])"},
-#endif
     {"_ZN5test01jINS_1AEEEvRAszdtcvT__E6buffer_c", "void test0::j<test0::A>(char (&) [sizeof ((test0::A)().buffer)])"},
     {"_ZN5test11fINS_1XEiEEvT_IT0_E", "void test1::f<test1::X, int>(test1::X<int>)"},
     {"_ZN5test211read_memberINS_1AEEEDtptcvPT_Li0E6memberERS2_", "decltype((test2::A*)(0)->member) test2::read_member<test2::A>(test2::A&)"},
@@ -29600,6 +29595,37 @@ const char* cases[][2] =
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
 
+struct FPLiteralCase {
+    const char *mangled;
+    // There are four possible demanglings of a given float.
+    std::string expecting[4];
+} fp_literal_cases[] =
+{
+    {"_ZN5test01gIfEEvRAszplcvT__ELf40a00000E_c", {
+        "void test0::g<float>(char (&) [sizeof (((float)()) + (0x1.4p+2f))])",
+        "void test0::g<float>(char (&) [sizeof (((float)()) + (0x2.8p+1f))])",
+        "void test0::g<float>(char (&) [sizeof (((float)()) + (0x5p+0f))])",
+        "void test0::g<float>(char (&) [sizeof (((float)()) + (0xap-1f))])",
+    }},
+    {"_ZN5test01hIfEEvRAszplcvT__ELd4014000000000000E_c", {
+        "void test0::h<float>(char (&) [sizeof (((float)()) + (0x1.4p+2))])",
+        "void test0::h<float>(char (&) [sizeof (((float)()) + (0x2.8p+1))])",
+        "void test0::h<float>(char (&) [sizeof (((float)()) + (0x5p+0))])",
+        "void test0::h<float>(char (&) [sizeof (((float)()) + (0xap-1))])",
+    }},
+#if LDBL_FP80
+    {"_ZN5test01hIfEEvRAcvjplstT_Le4001a000000000000000E_c", {
+        "void test0::h<float>(char (&) [(unsigned int)((sizeof (float)) + (0x1.4p+2L))])",
+        "void test0::h<float>(char (&) [(unsigned int)((sizeof (float)) + (0x2.8p+1L))])",
+        "void test0::h<float>(char (&) [(unsigned int)((sizeof (float)) + (0x5p+0L))])",
+        "void test0::h<float>(char (&) [(unsigned int)((sizeof (float)) + (0xap-1L))])",
+    }},
+#endif
+};
+const unsigned NF = sizeof(fp_literal_cases) / sizeof(fp_literal_cases[0]);
+const unsigned NEF = sizeof(fp_literal_cases[0].expecting) / sizeof(fp_literal_cases[0].expecting[0]);
+
+
 const char* invalid_cases[] =
 {
     "_ZIPPreEncode",
@@ -29665,6 +29691,36 @@ void test2()
     free(buf);
 }
 
+void testFPLiterals()
+{
+    std::size_t len = 0;
+    char* buf = nullptr;
+    for (unsigned i = 0; i < NF; ++i)
+    {
+        FPLiteralCase *fpCase = fp_literal_cases+i;
+        int status;
+        char* demang = __cxxabiv1::__cxa_demangle(fpCase->mangled, buf, &len, &status);
+        if (demang == 0)
+        {
+            std::cout << fpCase->mangled << " -> " << fpCase->expecting[0] << '\n';
+            std::cout << "Got instead: NULL, " << status << '\n';
+            assert(false);
+            continue;
+        }
+        std::string *e_beg = fpCase->expecting;
+        std::string *e_end = fpCase->expecting + NEF;
+        if (std::find(e_beg, e_end, demang) == e_end)
+        {
+            std::cout << fpCase->mangled << " -> " << fpCase->expecting[0] << '\n';
+            std::cout << "Got instead: " << demang << '\n';
+            assert(false);
+            continue;
+        }
+        buf = demang;
+    }
+    free(buf);
+}
+
 int main()
 {
     std::cout << "Testing " << N << " symbols." << std::endl;
@@ -29672,6 +29728,7 @@ int main()
         timer t;
         test();
         test2();
+        testFPLiterals();
     }
 #if 0
     std::string input;
