@@ -29478,7 +29478,6 @@ const char* cases[][2] =
     {"_Z1fPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP1XS13_S12_S11_S10_SZ_SY_SX_SW_SV_SU_ST_SS_SR_SQ_SP_SO_SN_SM_SL_SK_SJ_SI_SH_SG_SF_SE_SD_SC_SB_SA_S9_S8_S7_S6_S5_S4_S3_S2_S1_S0_S_", "f(X****************************************, X****************************************, X***************************************, X**************************************, X*************************************, X************************************, X***********************************, X**********************************, X*********************************, X********************************, X*******************************, X******************************, X*****************************, X****************************, X***************************, X**************************, X*************************, X************************, X***********************, X**********************, X*********************, X********************, X*******************, X******************, X*****************, X****************, X***************, X**************, X*************, X************, X***********, X**********, X*********, X********, X*******, X******, X*****, X****, X***, X**, X*, X)"},
     {"_ZZN1J1KEvENK1C1FEv", "J::K()::C::F() const"},
     {"_ZZNVK1J1KEvENK1C1FEv", "J::K() const volatile::C::F() const"},
-    {"U4_farrVKPi", "int* const volatile restrict _far"},
     {"_Z1fM1AKFvvE", "f(void (A::*)() const)"},
     {"_ZNR1X1fEv", "X::f() &"},
     {"_ZNKO1X1hEv", "X::h() const &&"},
@@ -29591,7 +29590,10 @@ const char* cases[][2] =
     {"_ZZ4testvEN1g3fooE5Point", "test()::g::foo(Point)"},
     {"_ZThn12_NSt9strstreamD0Ev",   "non-virtual thunk to std::strstream::~strstream()"},
     {"_ZTv0_n12_NSt9strstreamD0Ev",     "virtual thunk to std::strstream::~strstream()"},
-    {"\x6D", "unsigned long"}, 	// This use to crash with ASAN
+
+    // NOTE: disable this test since it is a negative test case, you cannot demangle a non-mangled symbol
+    // {"\x6D", nullptr}, 	// This use to crash with ASAN
+    {"_ZTIU4_farrVKPi", "typeinfo for int* const volatile restrict _far"},
 };
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
