@@ -29594,6 +29594,9 @@ const char* cases[][2] =
     // NOTE: disable this test since it is a negative test case, you cannot demangle a non-mangled symbol
     // {"\x6D", nullptr}, 	// This use to crash with ASAN
     {"_ZTIU4_farrVKPi", "typeinfo for int* const volatile restrict _far"},
+
+    // mangled names can include type manglings too, which don't start with _Z:
+    {"i", "int"},
 };
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
