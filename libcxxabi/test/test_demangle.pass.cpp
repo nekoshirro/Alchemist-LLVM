@@ -29597,6 +29597,12 @@ const char* cases[][2] =
 
     // mangled names can include type manglings too, which don't start with _Z:
     {"i", "int"},
+
+    // FIXME(compnerd) this should be void (int &) const
+    {"PKFvRiE", "void (*)(int const&)"},
+    // TODO(compnerd) pretty print this as void (*)(unsigned long&) volatile &&"
+    {"PVFvRmOE", "void (*)(unsigned long&)  volatile&&"},
+    {"PFvRmOE", "void (*)(unsigned long&) &&"},
 };
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
