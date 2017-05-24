@@ -29500,6 +29500,7 @@ const char* cases[][2] =
     {"_ZZ2f6vE1b", "f6()::b"},
     {"_ZNV3$_35test9Ev", "$_3::test9() volatile"},
     {"_ZN5Test8I3$_2EC1ES0_", "Test8<$_2>::Test8($_2)"},
+    {"_Z3fooIZN3BarC1EvE3$_0EvT_", "void foo<Bar::Bar()::$_0>(Bar::Bar()::$_0)"},
     {"_ZGVZN1N1gEvE1a", "guard variable for N::g()::a"},
     {"_ZplRK1YRA100_P1X", "operator+(Y const&, X* (&) [100])"},
     {"_Z1fno", "f(__int128, unsigned __int128)"},
