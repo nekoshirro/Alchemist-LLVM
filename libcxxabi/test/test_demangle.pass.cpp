@@ -29600,8 +29600,7 @@ const char* cases[][2] =
     {"i", "int"},
 
     {"PKFvRiE", "void (*)(int&) const"},
-    // FIXME(compnerd) pretty print this as void (*)(unsigned long &) volatile &&
-    {"PVFvRmOE", "void (*)(unsigned long&)  volatile&&"},
+    {"PVFvRmOE", "void (*)(unsigned long&) volatile &&"},
     {"PFvRmOE", "void (*)(unsigned long&) &&"},
     {"_ZTW1x", "thread-local wrapper routine for x"},
     {"_ZTHN3fooE", "thread-local initialization routine for foo"},
