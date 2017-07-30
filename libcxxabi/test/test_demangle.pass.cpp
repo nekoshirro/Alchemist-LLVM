@@ -29669,6 +29669,13 @@ const char* invalid_cases[] =
     "Z1JIJ1_T_EE3o00EUlT_E0",
     "___Z2i_D1D1D1D1D1D1D1D1D1D1D1D1D1D1D1D1D1D1D1D1D1D1D1D1D1D1D1D1D1D",
     "ZcvSdIZcvSdIZcvSdIZcvSdIZcvSdIZcvSdIDv_ZcvSdIZcvSdIZcvSdIZcvSdIZcvSdIZcvSdIDv_ZcvSdIZcvSdIZcvSdIZcvSdIZcvSdIZcvSdIDv_Dv_Dv_Dv_Dv_dZcvSdIZcvSdIZcvSdIZcvSdIZcvSdIZcvSdIDv_ZcvSdIZcvSdIZcvSdIZcvSdIZcvSdIZcvSdIDv_ZcvSdIZcvSdIZcvSdIZcvSdIZcvSdIZcvSdIDv_Dv_Dv_Dv_Dv_d",
+    "Z1 Z1 IJEEAcvZcvT_EcvT_T_",
+    "T_IZaaIJEEAnaaaT_T__",
+    "PT_IJPNT_IJEET_T_T_T_)J)JKE",
+    "1 IJEVNT_T_T_EE",
+    "AT__ZSiIJEEAnwscT_T__",
+    "FSiIJEENT_IoE ",
+    "ZTVSiIZTVSiIZTVSiIZTVSiINIJEET_T_T_T_T_ ",
 };
 
 const unsigned NI = sizeof(invalid_cases) / sizeof(invalid_cases[0]);
