@@ -29676,6 +29676,7 @@ const char* invalid_cases[] =
     "AT__ZSiIJEEAnwscT_T__",
     "FSiIJEENT_IoE ",
     "ZTVSiIZTVSiIZTVSiIZTVSiINIJEET_T_T_T_T_ ",
+    "_ZSiIJEvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvttvvvvvvET_v",
 };
 
 const unsigned NI = sizeof(invalid_cases) / sizeof(invalid_cases[0]);
