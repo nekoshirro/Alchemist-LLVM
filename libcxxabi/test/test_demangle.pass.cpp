@@ -29712,7 +29712,7 @@ void test()
     free(buf);
 }
 
-void test2()
+void test_invalid_cases()
 {
     std::size_t len = 0;
     char* buf = nullptr;
@@ -29723,6 +29723,36 @@ void test2()
         if (status != -2)
         {
             std::cout << invalid_cases[i] << " should be invalid but is not\n" << " got status = " << status << '\n';
+            assert(status == -2);
+        }
+        else
+        {
+            buf = demang;
+        }
+    }
+    free(buf);
+}
+
+const char *xfail_cases[] = {
+    "_Z1fUa9enable_ifIXLi1EEEv", // enable_if attribute
+    "_ZDC2a12a2E", // decomposition decl
+    "_ZW6FooBarE2f3v", // C++ modules TS
+};
+
+const size_t num_xfails = sizeof(xfail_cases) / sizeof(xfail_cases[0]);
+
+void test_xfail_cases()
+{
+    std::size_t len = 0;
+    char* buf = nullptr;
+    for (std::size_t i = 0; i < num_xfails; ++i)
+    {
+        int status;
+        char* demang = __cxxabiv1::__cxa_demangle(xfail_cases[i], buf, &len, &status);
+        if (status != -2)
+        {
+            std::cout << xfail_cases[i] << " was documented as xfail but passed\n"
+                      << "got status = " << status << '\n';
             assert(status == -2);
         }
         else
@@ -29769,7 +29799,8 @@ int main()
     {
         timer t;
         test();
-        test2();
+        test_invalid_cases();
+        test_xfail_cases();
         testFPLiterals();
     }
 #if 0
