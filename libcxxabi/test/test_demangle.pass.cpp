@@ -29605,6 +29605,12 @@ const char* cases[][2] =
     {"_ZTW1x", "thread-local wrapper routine for x"},
     {"_ZTHN3fooE", "thread-local initialization routine for foo"},
     {"_Z4algoIJiiiEEvZ1gEUlT_E_", "void algo<int, int, int>(g::'lambda'(int, int, int))"},
+    // attribute abi_tag
+    {"_Z1fB3foov", "f[abi:foo]()"},
+    {"_Z1fB3fooB3barv", "f[abi:foo][abi:bar]()"},
+    {"_ZN1SB5outer1fB5innerEv", "S[abi:outer]::f[abi:inner]()"},
+    {"_ZN1SC2B8ctor_tagEv", "S::S[abi:ctor_tag]()"},
+    {"_ZplB4MERP1SS_", "operator+[abi:MERP](S, S)"},
 };
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
