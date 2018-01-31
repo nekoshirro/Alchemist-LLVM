@@ -29585,7 +29585,7 @@ const char* cases[][2] =
     {"_Z1fPU11objcproto1A11objc_object", "f(id<A>)"},
     {"_Z1fPKU11objcproto1A7NSArray", "f(NSArray<A> const*)"},
     {"_ZNK1AIJ1Z1Y1XEEcv1BIJDpPT_EEIJS2_S1_S0_EEEv", "A<Z, Y, X>::operator B<X*, Y*, Z*><X, Y, Z>() const"},
-    {"_ZNK3Ncr6Silver7Utility6detail12CallOnThreadIZ53-[DeploymentSetupController handleManualServerEntry:]E3$_5EclIJEEEDTclclL_ZNS2_4getTIS4_EERT_vEEspclsr3stdE7forwardIT_Efp_EEEDpOSA_", "decltype(-[DeploymentSetupController handleManualServerEntry:]::$_5& Ncr::Silver::Utility::detail::getT<-[DeploymentSetupController handleManualServerEntry:]::$_5>()()(std::forward<-[DeploymentSetupController handleManualServerEntry:]::$_5>(fp))) Ncr::Silver::Utility::detail::CallOnThread<-[DeploymentSetupController handleManualServerEntry:]::$_5>::operator()<>(-[DeploymentSetupController handleManualServerEntry:]::$_5&&) const"},
+    {"_ZNK3Ncr6Silver7Utility6detail12CallOnThreadIZ53-[DeploymentSetupController handleManualServerEntry:]E3$_5EclIJEEEDTclclL_ZNS2_4getTIS4_EERT_vEEspclsr3stdE7forwardIT_Efp_EEEDpOSA_", "decltype(-[DeploymentSetupController handleManualServerEntry:]::$_5& Ncr::Silver::Utility::detail::getT<-[DeploymentSetupController handleManualServerEntry:]::$_5>()()(std::forward<-[DeploymentSetupController handleManualServerEntry:]::$_5>(fp)...)) Ncr::Silver::Utility::detail::CallOnThread<-[DeploymentSetupController handleManualServerEntry:]::$_5>::operator()<>(-[DeploymentSetupController handleManualServerEntry:]::$_5&&...) const"},
     {"_Zli2_xy", "operator\"\" _x(unsigned long long)"},
     {"_Z1fIiEDcT_", "decltype(auto) f<int>(int)"},
     {"_ZZ4testvEN1g3fooE5Point", "test()::g::foo(Point)"},
@@ -29604,13 +29604,19 @@ const char* cases[][2] =
     {"PFvRmOE", "void (*)(unsigned long&) &&"},
     {"_ZTW1x", "thread-local wrapper routine for x"},
     {"_ZTHN3fooE", "thread-local initialization routine for foo"},
-    {"_Z4algoIJiiiEEvZ1gEUlT_E_", "void algo<int, int, int>(g::'lambda'(int, int, int))"},
+    {"_Z4algoIJiiiEEvZ1gEUlDpT_E_", "void algo<int, int, int>(g::'lambda'(int, int, int))"},
     // attribute abi_tag
     {"_Z1fB3foov", "f[abi:foo]()"},
     {"_Z1fB3fooB3barv", "f[abi:foo][abi:bar]()"},
     {"_ZN1SB5outer1fB5innerEv", "S[abi:outer]::f[abi:inner]()"},
     {"_ZN1SC2B8ctor_tagEv", "S::S[abi:ctor_tag]()"},
     {"_ZplB4MERP1SS_", "operator+[abi:MERP](S, S)"},
+
+    {"_Z1fIJifcEEvDp5unaryIT_E", "void f<int, float, char>(unary<int>, unary<float>, unary<char>)"},
+    {"_Z1fIJEJiEEvDpT_DpT0_", "void f<int>(int)"},
+    {"_Z1fIJicEEvDp7MuncherIAstT__S1_E", "void f<int, char>(Muncher<int [sizeof (int)]>, Muncher<char [sizeof (char)]>)"},
+    {"_ZN1SIJifcEE1fIJdjEEEiDp4MerpIJifcT_EE", "int S<int, float, char>::f<double, unsigned int>(Merp<int, float, char, double>, Merp<int, float, char, unsigned int>)"},
+    {"_Z1pIJicEEiDp4MerpIXsZT_EJT_EE", "int p<int, char>(Merp<sizeof...(int, char), int>, Merp<sizeof...(int, char), char>)"},
 };
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
