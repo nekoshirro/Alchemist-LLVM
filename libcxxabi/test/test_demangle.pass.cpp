@@ -29617,6 +29617,45 @@ const char* cases[][2] =
     {"_Z1fIJicEEvDp7MuncherIAstT__S1_E", "void f<int, char>(Muncher<int [sizeof (int)]>, Muncher<char [sizeof (char)]>)"},
     {"_ZN1SIJifcEE1fIJdjEEEiDp4MerpIJifcT_EE", "int S<int, float, char>::f<double, unsigned int>(Merp<int, float, char, double>, Merp<int, float, char, unsigned int>)"},
     {"_Z1pIJicEEiDp4MerpIXsZT_EJT_EE", "int p<int, char>(Merp<sizeof...(int, char), int>, Merp<sizeof...(int, char), char>)"},
+
+    // Some expression symbols found in clang's test/CodeGenCXX/mangle-exprs.cpp
+    {"_ZN5Casts8implicitILj4EEEvPN9enable_ifIXleT_Li4EEvE4typeE", "void Casts::implicit<4u>(enable_if<(4u) <= (4), void>::type*)"},
+    {"_ZN5Casts6cstyleILj4EEEvPN9enable_ifIXleT_cvjLi4EEvE4typeE", "void Casts::cstyle<4u>(enable_if<(4u) <= ((unsigned int)(4)), void>::type*)"},
+    {"_ZN5Casts10functionalILj4EEEvPN9enable_ifIXleT_cvjLi4EEvE4typeE", "void Casts::functional<4u>(enable_if<(4u) <= ((unsigned int)(4)), void>::type*)"},
+    {"_ZN5Casts7static_ILj4EEEvPN9enable_ifIXleT_scjLi4EEvE4typeE", "void Casts::static_<4u>(enable_if<(4u) <= (static_cast<unsigned int>(4)), void>::type*)"},
+    {"_ZN5Casts12reinterpret_ILj4EiEEvPN9enable_ifIXleT_szrcPT0_Li0EEvE4typeE", "void Casts::reinterpret_<4u, int>(enable_if<(4u) <= (sizeof (reinterpret_cast<int*>(0))), void>::type*)"},
+    {"_ZN5Casts6const_IiXadL_ZNS_1iEEEEEvPN9enable_ifIXleLi0EszccPT_T0_EvE4typeE", "void Casts::const_<int, &(Casts::i)>(enable_if<(0) <= (sizeof (const_cast<int*>(&(Casts::i)))), void>::type*)"},
+    {"_ZN5Casts8dynamic_INS_1SEXadL_ZNS_1sEEEEEvPN9enable_ifIXleLi0EszdcPT_T0_EvE4typeE", "void Casts::dynamic_<Casts::S, &(Casts::s)>(enable_if<(0) <= (sizeof (dynamic_cast<Casts::S*>(&(Casts::s)))), void>::type*)"},
+    {"_ZN5Casts1fILi6EEENS_1TIXT_EEEv", "Casts::T<6> Casts::f<6>()"},
+    {"_ZN5Casts5auto_IiEEvDTnw_DapicvT__EEE", "void Casts::auto_<int>(decltype(new auto((int)())))"},
+    {"_ZN5Casts7scalar_IiEEvDTcmcvT__Ecvi_EE", "void Casts::scalar_<int>(decltype(((int)()) , ((int)())))"},
+    {"_ZN5test11aIsEEDTcl3foocvT__EEES1_", "decltype(foo((short)())) test1::a<short>(short)"},
+    {"_ZN5test21aIPFfvEEEvT_DTclfL0p_EE", "void test2::a<float (*)()>(float (*)(), decltype(fp()))"},
+    {"_ZN5test21bIPFfvEEEDTclfp_EET_", "decltype(fp()) test2::b<float (*)()>(float (*)())"},
+    {"_ZN5test21cIPFfvEEEvT_PFvDTclfL1p_EEE", "void test2::c<float (*)()>(float (*)(), void (*)(decltype(fp())))"},
+    {"_ZN5test21dIPFfvEEEvT_PFDTclfL0p_EEvE", "void test2::d<float (*)()>(float (*)(), decltype(fp()) (*)())"},
+    {"_ZN5test21eIPFfvEEEvPFDTclfp_EET_E", "void test2::e<float (*)()>(decltype(fp()) (*)(float (*)()))"},
+    {"_ZN5test21fIPFfvEEEvPFvT_DTclfL0p_EEE", "void test2::f<float (*)()>(void (*)(float (*)(), decltype(fp())))"},
+    {"_ZN5test21gIPFfvEEEvT_DTclfL0p_EE", "void test2::g<float (*)()>(float (*)(), decltype(fp()))"},
+    {"_ZN5test21hIPFfvEEEvT_DTcvPFDTclfL0p_EEvELi0EE", "void test2::h<float (*)()>(float (*)(), decltype((decltype(fp()) (*)())(0)))"},
+    {"_ZN5test21iIPFfvEEEvDTcvPFDTclfp_EET_ELi0EE", "void test2::i<float (*)()>(decltype((decltype(fp()) (*)(float (*)()))(0)))"},
+    {"_ZZN5test21gIPFfvEEEvT_DTclfL0p_EEE8variable", "void test2::g<float (*)()>(float (*)(), decltype(fp()))::variable"},
+    {"_ZN5test31aINS_1XEMS1_PiEEvT_T0_DTdsfL0p_fL0p0_E", "void test3::a<test3::X, int* test3::X::*>(test3::X, int* test3::X::*, decltype(fp.*fp0))"},
+    {"_ZN5test43tf1INS_1XEEEvDTnw_T_piLi1EEE", "void test4::tf1<test4::X>(decltype(new test4::X(1)))"},
+    {"_ZN5test51aIiEEvDTnxcvT__EE", "void test5::a<int>(decltype(noexcept ((int)())))"},
+    {"_ZN5test62f1IiEEvDTcvT_dtdtL_ZNS_1zEE2ua1iE", "void test6::f1<int>(decltype((int)(test6::z.ua.i)))"},
+    {"_ZN5test62f2IiEEvDTcvT_dtdtL_ZNS_1zEE2ub1iE", "void test6::f2<int>(decltype((int)(test6::z.ub.i)))"},
+    {"_ZN5test62f3IiEEvDTcvT_dtdtL_ZNS_1zEE1s1iE", "void test6::f3<int>(decltype((int)(test6::z.s.i)))"},
+    {"_ZN5test62f4IiEEvDTcvT_dtdtL_ZNS_1zEE4uuss1iE", "void test6::f4<int>(decltype((int)(test6::z.uuss.i)))"},
+    {"_ZN5test62f5IiEEvDTcvT_dtptL_ZNS_2zpEE2ua1iE", "void test6::f5<int>(decltype((int)(test6::zp->ua.i)))"},
+    {"_ZN5test62f6IiEEvDTcvT_dtptL_ZNS_2zpEE2ub1iE", "void test6::f6<int>(decltype((int)(test6::zp->ub.i)))"},
+    {"_ZN5test62f7IiEEvDTcvT_dtptL_ZNS_2zpEE1s1iE", "void test6::f7<int>(decltype((int)(test6::zp->s.i)))"},
+    {"_ZN5test62f8IiEEvDTcvT_dtptL_ZNS_2zpEE4uuss1iE", "void test6::f8<int>(decltype((int)(test6::zp->uuss.i)))"},
+    {"_ZN5test73fD2IiEEDTcmcvNS_1DEL_ZNS_1bEEcvT__EES2_", "decltype(((test7::D)(test7::b)) , ((int)())) test7::fD2<int>(int)"},
+    {"_ZN5test73fT2IiEEDTcvT__EES1_", "decltype((int)()) test7::fT2<int>(int)"},
+    {"_ZN5test73fT4IiEEDTcvT_Li1EES1_", "decltype((int)(1)) test7::fT4<int>(int)"},
+    {"_ZN5test73fT6INS_1BEEEDTcvT__Li1ELi2EEES2_", "decltype((test7::B)(1, 2)) test7::fT6<test7::B>(test7::B)"},
+    {"_ZNK5test81XIiE3barIiEEDTcl3fooIT_EEEv", "decltype(foo<int>()) test8::X<int>::bar<int>() const"},
 };
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
@@ -29749,6 +29788,36 @@ const char *xfail_cases[] = {
     "_Z1fUa9enable_ifIXLi1EEEv", // enable_if attribute
     "_ZDC2a12a2E", // decomposition decl
     "_ZW6FooBarE2f3v", // C++ modules TS
+
+    // FIXME: Why does clang generate the "cp" expr?
+    "_ZN5test11bIsEEDTcp3foocvT__EEES1_",
+
+    // Initializer list expressions:
+    "_ZN5test43tf2INS_1XEEEvDTnw_T_piilLi1EEEE",
+    "_ZN5test43tf3INS_1XEEEvDTnw_T_ilLi1EEE",
+    "_ZN5test73fA1IiEEDTcmtlNS_1AELi1ELi2EEcvT__EES2_",
+    "_ZN5test73fA2IiEEDTcmcvNS_1AEilLi1ELi2EEcvT__EES2_",
+    "_ZN5test73fB1IiEEDTcmtlNS_1BELi1ELi2EEcvT__EES2_",
+    "_ZN5test73fB2IiEEDTcmcvNS_1BEilLi1ELi2EEcvT__EES2_",
+    "_ZN5test73fC1IiEEDTcmtlNS_1CEilLi1ELi2EEEcvT__EES2_",
+    "_ZN5test73fC2IiEEDTcmcvNS_1CEilLi1ELi2EEcvT__EES2_",
+    "_ZN5test73fD1IiEEDTcmtlNS_1DEL_ZNS_1bEEEcvT__EES2_",
+    "_ZN5test73fE1IiEEDTcmtlNS_1EELi1ELi2EEcvT__EES2_",
+    "_ZN5test73fE2IiEEDTcmcvNS_1EEilLi1ELi2EEcvT__EES2_",
+    "_ZN5test73fF1IiEEDTcmtlNS_1FEilLi1ELi2EEEcvT__EES2_",
+    "_ZN5test73fF2IiEEDTcmcvNS_1FEilLi1ELi2EEcvT__EES2_",
+    "_ZN5test73fT1IiEEDTtlT_EES1_",
+    "_ZN5test73fT3IiEEDTtlT_Li1EEES1_",
+    "_ZN5test73fT5INS_1BEEEDTtlT_Li1ELi2EEES2_",
+    "_ZN5test73fT7INS_1AEEEDTtlT_ilEEES2_",
+    "_ZN5test73fT8INS_1AEEEDTcvT_ilEES2_",
+    "_ZN5test73fT9INS_1AEEEDTtlT_ilLi1EEEES2_",
+    "_ZN5test73fTAINS_1AEEEDTcvT_ilLi1EEES2_",
+    "_ZN5test73fTBINS_1CEEEDTtlT_ilLi1ELi2EEEES2_",
+    "_ZN5test73fTCINS_1CEEEDTcvT_ilLi1ELi2EEES2_",
+
+    // Designated init expressions
+    "_ZN15designated_init1fINS_1AEEEvDTtlT_di1adi1bdxLi3EdXLi1ELi4ELi9EEE",
 };
 
 const size_t num_xfails = sizeof(xfail_cases) / sizeof(xfail_cases[0]);
