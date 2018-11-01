@@ -1,4 +1,5 @@
 // RUN: %clang_builtins %s %librt -o %t && %run %t
+// REQUIRES: int128
 //===-- udivmodti4_test.c - Test __udivmodti4 -----------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
