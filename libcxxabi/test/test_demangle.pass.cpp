@@ -767,8 +767,14 @@ const char* cases[][2] =
     {"_ZNK5clang14ASTMergeAction24hasCodeCompletionSupportEv", "clang::ASTMergeAction::hasCodeCompletionSupport() const"},
     {"_ZN5clang7ASTUnitC1Eb", "clang::ASTUnit::ASTUnit(bool)"},
     {"_ZN5clang7ASTUnitC2Eb", "clang::ASTUnit::ASTUnit(bool)"},
+    {"_ZN5clang7ASTUnitC3Eb", "clang::ASTUnit::ASTUnit(bool)"},
+    {"_ZN5clang7ASTUnitC4Eb", "clang::ASTUnit::ASTUnit(bool)"},
+    {"_ZN5clang7ASTUnitC5Eb", "clang::ASTUnit::ASTUnit(bool)"},
+    {"_ZN5clang7ASTUnitD0Ev", "clang::ASTUnit::~ASTUnit()"},
     {"_ZN5clang7ASTUnitD1Ev", "clang::ASTUnit::~ASTUnit()"},
     {"_ZN5clang7ASTUnitD2Ev", "clang::ASTUnit::~ASTUnit()"},
+    {"_ZN5clang7ASTUnitD4Ev", "clang::ASTUnit::~ASTUnit()"},
+    {"_ZN5clang7ASTUnitD5Ev", "clang::ASTUnit::~ASTUnit()"},
     {"_ZN5clang7ASTUnit19CleanTemporaryFilesEv", "clang::ASTUnit::CleanTemporaryFiles()"},
     {"_ZN5clang7ASTUnit28ClearCachedCompletionResultsEv", "clang::ASTUnit::ClearCachedCompletionResults()"},
     {"_ZN5clang7ASTUnit26CacheCodeCompletionResultsEv", "clang::ASTUnit::CacheCodeCompletionResults()"},
@@ -29759,7 +29765,16 @@ const char* cases[][2] =
     {"____Z3foo_block_invoke.25", "invocation function for block in foo"},
     {"__Z1fv", "f()"},
 
-    {"_Z2tfIZUb_E1SEiv", "int tf<'block-literal'::S>()"}
+    {"_Z2tfIZUb_E1SEiv", "int tf<'block-literal'::S>()"},
+
+    // Vendor extension types are substitution candidates.
+    {"_Z1fu3fooS_", "f(foo, foo)"},
+
+    {"_ZN3FooIXu8__uuidofzdeL_Z3sucEEEC1Ev", "Foo<__uuidof(*(suc))>::Foo()"},
+    {"_ZN3FooIXu8__uuidoft13SomeUUIDClassEEC1Ev", "Foo<__uuidof(SomeUUIDClass)>::Foo()"},
+
+    // C++2a char8_t:
+    {"_ZTSPDu", "typeinfo name for char8_t*"},
 };
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
