@@ -7,13 +7,15 @@
 //===----------------------------------------------------------------------===//
 
 #include "src/string/strcpy.h"
+#include "src/string/strlen.h"
 
 #include "src/__support/common.h"
 
 namespace __llvm_libc {
 
 char *LLVM_LIBC_ENTRYPOINT(strcpy)(char *dest, const char *src) {
-  return reinterpret_cast<char *>(::memcpy(dest, src, ::strlen(src) + 1));
+  return reinterpret_cast<char *>(
+      ::memcpy(dest, src, __llvm_libc::strlen(src) + 1));
 }
 
 } // namespace __llvm_libc
