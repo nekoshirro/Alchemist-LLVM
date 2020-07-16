@@ -29792,6 +29792,21 @@ const char* cases[][2] =
     //   "auto inline_func()::'lambda'<int, int>(int, int) const"
     {"_ZZ11inline_funcvENKUlTyTyT_T0_E_clIiiEEDaS_S0_", "auto inline_func()::'lambda'<typename $T, typename $T0>($T, $T0)::operator()<int, int>($T, $T0) const"},
     {"_ZZ11inline_funcvENKUlTyTyT_T1_T0_E_clIiiiEEDaS_S0_S1_", "auto inline_func()::'lambda'<typename $T, typename $T0>($T, auto, $T0)::operator()<int, int, int>($T, auto, $T0) const"},
+    {"_ZN1XIZ1fIiEvOT_EUlOT_DpT0_E_EclIJEEEvDpT_", "void X<void f<int>(int&&)::'lambda'(auto&&, auto...)>::operator()<>()"},
+    // FIXME: This is wrong, should demangle to the same as the previous entry.
+    // See https://github.com/itanium-cxx-abi/cxx-abi/issues/106.
+    {"_ZN1XIZ1fIiEvOT_EUlS2_DpT0_E_EclIJEEEvDpT_", "void X<void f<int>(int&&)::'lambda'(int&&, auto...)>::operator()<>()"},
+    {"_ZZZZN6abcdef9abcdefghi29abcdefabcdefabcdefabcefabcdef27xxxxxxxxxxxxxxxxxxxxxxxxxxxEN4absl8DurationERKNSt3__u12basic_stringIcNS4_11char_traitsIcEENS4_9allocatorIcEEEEPNS1_19yyyyyyyyyyyyyyyyyyyEENK3$_5clEvENKUlvE_clEvE6zzzzzz", "abcdef::abcdefghi::abcdefabcdefabcdefabcefabcdef::xxxxxxxxxxxxxxxxxxxxxxxxxxx(absl::Duration, std::__u::basic_string<char, std::__u::char_traits<char>, std::__u::allocator<char> > const&, abcdef::abcdefghi::abcdefabcdefabcdefabcefabcdef::yyyyyyyyyyyyyyyyyyy*)::$_5::operator()() const::'lambda'()::operator()() const::zzzzzz"},
+
+    // FIXME: This is wrong; the S2_ backref should expand to OT_ and then to
+    // "double&&". But we can't cope with a substitution that represents a
+    // different type the node it is a substitute for.
+    // See https://github.com/itanium-cxx-abi/cxx-abi/issues/106.
+    {"_Z1h1XIJZ1fIiEDaOT_E1AZ1gIdEDaS2_E1BEE", "h(X<auto f<int>(int&&)::A, auto g<double>(int&&)::B>)"},
+
+    {"_Z1fIL4Enumn1EEvv", "void f<(Enum)-1>()"},
+
+    {"_ZN1A1gIiEEDTcldtptfpT1b1fIT_EEEv", "decltype(this->b.f<int>()) A::g<int>()"},
 };
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
