@@ -14,7 +14,7 @@
 // Test the feature test macros defined by <concepts>
 
 /*  Constant              Value
-    __cpp_lib_concepts    201806L [C++20]
+    __cpp_lib_concepts    202002L [C++20]
 */
 
 #include <concepts>
@@ -44,8 +44,8 @@
 #   ifndef __cpp_lib_concepts
 #     error "__cpp_lib_concepts should be defined in c++20"
 #   endif
-#   if __cpp_lib_concepts != 201806L
-#     error "__cpp_lib_concepts should have the value 201806L in c++20"
+#   if __cpp_lib_concepts != 202002L
+#     error "__cpp_lib_concepts should have the value 202002L in c++20"
 #   endif
 # else // _LIBCPP_VERSION
 #   ifdef __cpp_lib_concepts
