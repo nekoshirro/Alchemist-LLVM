@@ -6,6 +6,15 @@
 //
 //===----------------------------------------------------------------------===//
 
+// The demangler does not pass all these tests with the system dylibs on macOS.
+// XFAIL: use_system_cxx_lib && x86_64-apple-macosx10.15
+// XFAIL: use_system_cxx_lib && x86_64-apple-macosx10.14
+// XFAIL: use_system_cxx_lib && x86_64-apple-macosx10.13
+// XFAIL: use_system_cxx_lib && x86_64-apple-macosx10.12
+// XFAIL: use_system_cxx_lib && x86_64-apple-macosx10.11
+// XFAIL: use_system_cxx_lib && x86_64-apple-macosx10.10
+// XFAIL: use_system_cxx_lib && x86_64-apple-macosx10.9
+
 #include "support/timer.h"
 #include <cassert>
 #include <cstdio>
@@ -29776,8 +29785,18 @@ const char* cases[][2] =
     // Vendor extension types are substitution candidates.
     {"_Z1fu3fooS_", "f(foo, foo)"},
 
-    {"_ZN3FooIXu8__uuidofzdeL_Z3sucEEEC1Ev", "Foo<__uuidof(*(suc))>::Foo()"},
-    {"_ZN3FooIXu8__uuidoft13SomeUUIDClassEEC1Ev", "Foo<__uuidof(SomeUUIDClass)>::Foo()"},
+    // alignof with type and expression, and __alignof__ with the same.
+    {"_Z2f1IiEvDTatT_E", "void f1<int>(decltype(alignof (int)))"},
+    {"_Z2f3IiEvDTazcvT_Li0EE", "void f3<int>(decltype(alignof ((int)(0))))"},
+    {"_Z2f2IiEvDTu11__alignof__T_EE", "void f2<int>(decltype(__alignof__(int)))"},
+    {"_Z2f4IiEvDTu11__alignof__XcvT_Li0EEEE", "void f4<int>(decltype(__alignof__((int)(0))))"},
+
+    // Legacy nonstandard mangling for __uuidof.
+    {"_Z15test_uuidofTypeI10TestStructEvDTu8__uuidoftT_E", "void test_uuidofType<TestStruct>(decltype(__uuidof(TestStruct)))"},
+    {"_Z15test_uuidofExprI9HasMemberEvDTu8__uuidofXsrT_6memberEEE", "void test_uuidofExpr<HasMember>(decltype(__uuidof(HasMember::member)))"},
+    // Current __uuidof mangling using vendor extended expression.
+    {"_Z15test_uuidofTypeI10TestStructEvDTu8__uuidofT_EE", "void test_uuidofType<TestStruct>(decltype(__uuidof(TestStruct)))"},
+    {"_Z15test_uuidofExprI9HasMemberEvDTu8__uuidofXsrT_6memberEEE", "void test_uuidofExpr<HasMember>(decltype(__uuidof(HasMember::member)))"},
 
     // C++2a char8_t:
     {"_ZTSPDu", "typeinfo name for char8_t*"},
@@ -29824,6 +29843,10 @@ const char* cases[][2] =
     {"_Z1fIL4Enumn1EEvv", "void f<(Enum)-1>()"},
 
     {"_ZN1A1gIiEEDTcldtptfpT1b1fIT_EEEv", "decltype(this->b.f<int>()) A::g<int>()"},
+
+    // Optional template-args for vendor extended type qualifier.
+    // See https://bugs.llvm.org/show_bug.cgi?id=48009.
+    {"_Z3fooILi79EEbU7_ExtIntIXT_EEi", "bool foo<79>(int _ExtInt<79>)"},
 };
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
