@@ -22,13 +22,15 @@ target triple = "nvptx64"
 ;;     unknown();
 ;;   }
 ;; }
-;; 
+;;
+;; void no_openmp(void) __attribute__((assume("omp_no_openmp")));
 ;; void test_no_fallback(void) {
 ;;   #pragma omp target teams
 ;;   {
 ;;     known();
 ;;     known();
 ;;     known();
+;;     no_openmp();     // make it non-spmd
 ;;   }
 ;; }
 
@@ -50,6 +52,7 @@ target triple = "nvptx64"
 @__omp_offloading_2a_d80d3d_test_no_fallback_l20_exec_mode = weak constant i8 1
 @12 = private unnamed_addr constant [73 x i8] c";llvm/test/Transforms/OpenMP/custom_state_machines_remarks.c;known;4;1;;\00", align 1
 @13 = private unnamed_addr constant %struct.ident_t { i32 0, i32 2, i32 2, i32 0, i8* getelementptr inbounds ([73 x i8], [73 x i8]* @12, i32 0, i32 0) }, align 8
+@G = external global i32
 @llvm.compiler.used = appending global [2 x i8*] [i8* @__omp_offloading_2a_d80d3d_test_fallback_l11_exec_mode, i8* @__omp_offloading_2a_d80d3d_test_no_fallback_l20_exec_mode], section "llvm.metadata"
 
 ; Function Attrs: convergent norecurse nounwind
@@ -124,6 +127,8 @@ user_code.entry:                                  ; preds = %entry
   %6 = call i32 @__kmpc_global_thread_num(%struct.ident_t* noundef nonnull @13) #3
   call void @__kmpc_parallel_51(%struct.ident_t* noundef nonnull @13, i32 %6, i32 noundef 1, i32 noundef -1, i32 noundef -1, i8* noundef bitcast (void (i32*, i32*)* @__omp_outlined__2 to i8*), i8* noundef bitcast (void (i16, i32)* @__omp_outlined__2_wrapper to i8*), i8** noundef nonnull %4, i64 noundef 0) #3, !dbg !43
   call void @llvm.lifetime.end.p0i8(i64 0, i8* nonnull %2) #3, !dbg !45
+  call void @no_openmp()
+  call void @no_parallelism()
   call void @__kmpc_target_deinit(%struct.ident_t* nonnull @11, i1 false, i1 true) #3, !dbg !46
   br label %common.ret
 }
@@ -154,6 +159,9 @@ declare void @llvm.lifetime.start.p0i8(i64 immarg, i8* nocapture) #5
 ; Function Attrs: argmemonly nofree nosync nounwind willreturn
 declare void @llvm.lifetime.end.p0i8(i64 immarg, i8* nocapture) #5
 
+declare void @no_openmp() #7
+declare void @no_parallelism() #8
+
 attributes #0 = { convergent norecurse nounwind "frame-pointer"="all" "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="sm_53" "target-features"="+ptx32,+sm_53" }
 attributes #1 = { convergent "frame-pointer"="all" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="sm_53" "target-features"="+ptx32,+sm_53" }
 attributes #2 = { nounwind "frame-pointer"="all" "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="sm_53" "target-features"="+ptx32,+sm_53" }
@@ -161,6 +169,8 @@ attributes #3 = { nounwind }
 attributes #4 = { norecurse nounwind "frame-pointer"="all" "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="sm_53" "target-features"="+ptx32,+sm_53" }
 attributes #5 = { argmemonly nofree nosync nounwind willreturn }
 attributes #6 = { convergent nounwind }
+attributes #7 = { "llvm.assume"="omp_no_openmp" }
+attributes #8 = { "llvm.assume"="omp_no_parallelism" }
 
 !llvm.dbg.cu = !{!0}
 !omp_offload.info = !{!3, !4}
