@@ -29855,6 +29855,8 @@ const char* cases[][2] =
     // This should be invalid, but it is currently not recognized as such
     // See https://llvm.org/PR51407
     {"_Zcv1BIRT_EIS1_E", "operator B<><>"},
+
+    {"_Z3TPLIiET_S0_", "int TPL<int>(int)"},
 };
 
 const unsigned N = sizeof(cases) / sizeof(cases[0]);
@@ -29944,51 +29946,43 @@ void test()
     for (unsigned i = 0; i < N; ++i)
     {
         int status;
-        char* demang = __cxxabiv1::__cxa_demangle(cases[i][0], buf, &len, &status);
-        if (demang == 0 || std::strcmp(demang, cases[i][1]) != 0)
+        char* demang =
+            __cxxabiv1::__cxa_demangle(cases[i][0], buf, &len, &status);
+        if (!demang || std::strcmp(demang, cases[i][1]) != 0)
         {
-            std::printf("ERROR demangling %s\nexpected: %s\n", cases[i][0], cases[i][1]);
-            if (demang)
-            {
-                std::printf(" reality: %s\n", demang);
-                buf = demang;
-                failed = true;
-            }
-            else
-            {
-                std::printf("Got instead: NULL, %d\n", status);
-                failed = true;
-            }
+            std::printf("ERROR demangling %s\nexpected: %s\n",
+                        cases[i][0], cases[i][1]);
+            std::printf("Got: %d, %s\n", status, demang ? demang : "(null)");
+            failed = true;
         }
-        else
-        {
-            buf = demang;
-        }
+        if (demang)
+          buf = demang;
     }
-    assert(!failed);
     free(buf);
+    assert(!failed && "demangle failed");
 }
 
 void test_invalid_cases()
 {
     std::size_t len = 0;
     char* buf = nullptr;
+    bool passed = false;
     for (unsigned i = 0; i < NI; ++i)
     {
         int status;
-        char* demang = __cxxabiv1::__cxa_demangle(invalid_cases[i], buf, &len, &status);
+        char* demang =
+            __cxxabiv1::__cxa_demangle(invalid_cases[i], buf, &len, &status);
         if (status != -2)
         {
             std::printf("%s should be invalid but is not\n", invalid_cases[i]);
-            std::printf("Got status %d\n", status);
-            assert(status == -2);
+            std::printf("Got: %d, %s\n", status, demang ? demang : "(null)");
+            passed = true;
         }
-        else
-        {
-            buf = demang;
-        }
+        if (demang)
+          buf = demang;
     }
     free(buf);
+    assert(!passed && "demangle did not fail");
 }
 
 const char *xfail_cases[] = {
