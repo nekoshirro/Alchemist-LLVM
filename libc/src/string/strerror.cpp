@@ -7,7 +7,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "src/string/strerror.h"
-#include "src/__support/CPP/span.h"
 #include "src/__support/common.h"
 #include "src/__support/error_to_string.h"
 
