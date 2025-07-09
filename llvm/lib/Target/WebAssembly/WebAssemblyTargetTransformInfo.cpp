@@ -53,7 +53,7 @@ TypeSize WebAssemblyTTIImpl::getRegisterBitWidth(
 InstructionCost WebAssemblyTTIImpl::getArithmeticInstrCost(
     unsigned Opcode, Type *Ty, TTI::TargetCostKind CostKind,
     TTI::OperandValueInfo Op1Info, TTI::OperandValueInfo Op2Info,
-    ArrayRef<const Value *> Args, const Instruction *CxtI) {
+    ArrayRef<const Value *> Args, const Instruction *CxtI) const {
 
   InstructionCost Cost =
       BasicTTIImplBase<WebAssemblyTTIImpl>::getArithmeticInstrCost(
@@ -81,7 +81,7 @@ InstructionCost WebAssemblyTTIImpl::getArithmeticInstrCost(
 
 InstructionCost WebAssemblyTTIImpl::getCastInstrCost(
     unsigned Opcode, Type *Dst, Type *Src, TTI::CastContextHint CCH,
-    TTI::TargetCostKind CostKind, const Instruction *I) {
+    TTI::TargetCostKind CostKind, const Instruction *I) const {
   int ISD = TLI->InstructionOpcodeToISD(Opcode);
   auto SrcTy = TLI->getValueType(DL, Src);
   auto DstTy = TLI->getValueType(DL, Dst);
@@ -142,9 +142,9 @@ InstructionCost WebAssemblyTTIImpl::getCastInstrCost(
 }
 
 InstructionCost WebAssemblyTTIImpl::getMemoryOpCost(
-    unsigned Opcode, Type *Ty, MaybeAlign Alignment, unsigned AddressSpace,
+    unsigned Opcode, Type *Ty, Align Alignment, unsigned AddressSpace,
     TTI::TargetCostKind CostKind, TTI::OperandValueInfo OpInfo,
-    const Instruction *I) {
+    const Instruction *I) const {
   if (!ST->hasSIMD128() || !isa<FixedVectorType>(Ty)) {
     return BaseT::getMemoryOpCost(Opcode, Ty, Alignment, AddressSpace,
                                   CostKind);
@@ -182,10 +182,9 @@ InstructionCost WebAssemblyTTIImpl::getMemoryOpCost(
   return BaseT::getMemoryOpCost(Opcode, Ty, Alignment, AddressSpace, CostKind);
 }
 
-InstructionCost
-WebAssemblyTTIImpl::getVectorInstrCost(unsigned Opcode, Type *Val,
-                                       TTI::TargetCostKind CostKind,
-                                       unsigned Index, Value *Op0, Value *Op1) {
+InstructionCost WebAssemblyTTIImpl::getVectorInstrCost(
+    unsigned Opcode, Type *Val, TTI::TargetCostKind CostKind, unsigned Index,
+    const Value *Op0, const Value *Op1) const {
   InstructionCost Cost = BasicTTIImplBase::getVectorInstrCost(
       Opcode, Val, CostKind, Index, Op0, Op1);
 
@@ -194,6 +193,53 @@ WebAssemblyTTIImpl::getVectorInstrCost(unsigned Opcode, Type *Val,
     return Cost + 25 * TargetTransformInfo::TCC_Expensive;
 
   return Cost;
+}
+
+InstructionCost WebAssemblyTTIImpl::getPartialReductionCost(
+    unsigned Opcode, Type *InputTypeA, Type *InputTypeB, Type *AccumType,
+    ElementCount VF, TTI::PartialReductionExtendKind OpAExtend,
+    TTI::PartialReductionExtendKind OpBExtend,
+    std::optional<unsigned> BinOp) const {
+  InstructionCost Invalid = InstructionCost::getInvalid();
+  if (!VF.isFixed() || !ST->hasSIMD128())
+    return Invalid;
+
+  InstructionCost Cost(TTI::TCC_Basic);
+
+  // Possible options:
+  // - i16x8.extadd_pairwise_i8x16_sx
+  // - i32x4.extadd_pairwise_i16x8_sx
+  // - i32x4.dot_i16x8_s
+  // Only try to support dot, for now.
+
+  if (Opcode != Instruction::Add)
+    return Invalid;
+
+  if (!BinOp || *BinOp != Instruction::Mul)
+    return Invalid;
+
+  if (InputTypeA != InputTypeB)
+    return Invalid;
+
+  if (OpAExtend != OpBExtend)
+    return Invalid;
+
+  EVT InputEVT = EVT::getEVT(InputTypeA);
+  EVT AccumEVT = EVT::getEVT(AccumType);
+
+  // TODO: Add i64 accumulator.
+  if (AccumEVT != MVT::i32)
+    return Invalid;
+
+  // Signed inputs can lower to dot
+  if (InputEVT == MVT::i16 && VF.getFixedValue() == 8)
+    return OpAExtend == TTI::PR_SignExtend ? Cost : Cost * 2;
+
+  // Double the size of the lowered sequence.
+  if (InputEVT == MVT::i8 && VF.getFixedValue() == 16)
+    return OpAExtend == TTI::PR_SignExtend ? Cost * 2 : Cost * 4;
+
+  return Invalid;
 }
 
 TTI::ReductionShuffle WebAssemblyTTIImpl::getPreferredExpandedReductionShuffle(
