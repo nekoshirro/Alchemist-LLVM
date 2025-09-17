@@ -115,7 +115,7 @@ static void reportTranslationError(MachineFunction &MF,
                                    const TargetPassConfig &TPC,
                                    OptimizationRemarkEmitter &ORE,
                                    OptimizationRemarkMissed &R) {
-  MF.getProperties().set(MachineFunctionProperties::Property::FailedISel);
+  MF.getProperties().setFailedISel();
 
   // Print the function name explicitly if we don't have a debug location (which
   // makes the diagnostic less useful) or if we're going to emit a raw error.
@@ -1114,8 +1114,8 @@ void IRTranslator::emitBitTestHeader(SwitchCG::BitTestBlock &B,
     MaskTy = LLT::scalar(PtrTy.getSizeInBits());
   else {
     // Ensure that the type will fit the mask value.
-    for (unsigned I = 0, E = B.Cases.size(); I != E; ++I) {
-      if (!isUIntN(SwitchOpTy.getSizeInBits(), B.Cases[I].Mask)) {
+    for (const SwitchCG::BitTestCase &Case : B.Cases) {
+      if (!isUIntN(SwitchOpTy.getSizeInBits(), Case.Mask)) {
         // Switch table case range are encoded into series of masks.
         // Just use pointer type, it's guaranteed to fit.
         MaskTy = LLT::scalar(PtrTy.getSizeInBits());
@@ -1409,7 +1409,7 @@ bool IRTranslator::translateLoad(const User &U, MachineIRBuilder &MIRBuilder) {
       Regs.size() == 1 ? LI.getMetadata(LLVMContext::MD_range) : nullptr;
   for (unsigned i = 0; i < Regs.size(); ++i) {
     Register Addr;
-    MIRBuilder.materializePtrAdd(Addr, Base, OffsetTy, Offsets[i] / 8);
+    MIRBuilder.materializeObjectPtrOffset(Addr, Base, OffsetTy, Offsets[i] / 8);
 
     MachinePointerInfo Ptr(LI.getPointerOperand(), Offsets[i] / 8);
     Align BaseAlign = getMemOpAlign(LI);
@@ -1448,7 +1448,7 @@ bool IRTranslator::translateStore(const User &U, MachineIRBuilder &MIRBuilder) {
 
   for (unsigned i = 0; i < Vals.size(); ++i) {
     Register Addr;
-    MIRBuilder.materializePtrAdd(Addr, Base, OffsetTy, Offsets[i] / 8);
+    MIRBuilder.materializeObjectPtrOffset(Addr, Base, OffsetTy, Offsets[i] / 8);
 
     MachinePointerInfo Ptr(SI.getPointerOperand(), Offsets[i] / 8);
     Align BaseAlign = getMemOpAlign(SI);
@@ -1681,7 +1681,7 @@ bool IRTranslator::translateGetElementPtr(const User &U,
     auto OffsetMIB =
         MIRBuilder.buildConstant(OffsetTy, Offset);
 
-    if (int64_t(Offset) >= 0 && cast<GEPOperator>(U).isInBounds())
+    if (Offset >= 0 && cast<GEPOperator>(U).isInBounds())
       Flags |= MachineInstr::MIFlag::NoUWrap;
 
     MIRBuilder.buildPtrAdd(getOrCreateVReg(U), BaseReg, OffsetMIB.getReg(0),
@@ -1731,10 +1731,6 @@ bool IRTranslator::translateMemFunc(const CallInst &CI,
   ConstantInt *CopySize = nullptr;
 
   if (auto *MCI = dyn_cast<MemCpyInst>(&CI)) {
-    DstAlign = MCI->getDestAlign().valueOrOne();
-    SrcAlign = MCI->getSourceAlign().valueOrOne();
-    CopySize = dyn_cast<ConstantInt>(MCI->getArgOperand(2));
-  } else if (auto *MCI = dyn_cast<MemCpyInlineInst>(&CI)) {
     DstAlign = MCI->getDestAlign().valueOrOne();
     SrcAlign = MCI->getSourceAlign().valueOrOne();
     CopySize = dyn_cast<ConstantInt>(MCI->getArgOperand(2));
@@ -1933,6 +1929,10 @@ unsigned IRTranslator::getSimpleIntrinsicOpcode(Intrinsic::ID ID) {
       return TargetOpcode::G_FMINIMUM;
     case Intrinsic::maximum:
       return TargetOpcode::G_FMAXIMUM;
+    case Intrinsic::minimumnum:
+      return TargetOpcode::G_FMINIMUMNUM;
+    case Intrinsic::maximumnum:
+      return TargetOpcode::G_FMAXIMUMNUM;
     case Intrinsic::canonicalize:
       return TargetOpcode::G_FCANONICALIZE;
     case Intrinsic::floor:
@@ -2189,23 +2189,11 @@ bool IRTranslator::translateKnownIntrinsic(const CallInst &CI, Intrinsic::ID ID,
     unsigned Op = ID == Intrinsic::lifetime_start ? TargetOpcode::LIFETIME_START
                                                   : TargetOpcode::LIFETIME_END;
 
-    // Get the underlying objects for the location passed on the lifetime
-    // marker.
-    SmallVector<const Value *, 4> Allocas;
-    getUnderlyingObjects(CI.getArgOperand(1), Allocas);
+    const AllocaInst *AI = cast<AllocaInst>(CI.getArgOperand(1));
+    if (!AI->isStaticAlloca())
+      return true;
 
-    // Iterate over each underlying object, creating lifetime markers for each
-    // static alloca. Quit if we find a non-static alloca.
-    for (const Value *V : Allocas) {
-      const AllocaInst *AI = dyn_cast<AllocaInst>(V);
-      if (!AI)
-        continue;
-
-      if (!AI->isStaticAlloca())
-        return true;
-
-      MIRBuilder.buildInstr(Op).addFrameIndex(getOrCreateFrameIndex(*AI));
-    }
+    MIRBuilder.buildInstr(Op).addFrameIndex(getOrCreateFrameIndex(*AI));
     return true;
   }
   case Intrinsic::fake_use: {
@@ -2593,6 +2581,9 @@ bool IRTranslator::translateKnownIntrinsic(const CallInst &CI, Intrinsic::ID ID,
   case Intrinsic::reset_fpmode:
     MIRBuilder.buildResetFPMode();
     return true;
+  case Intrinsic::get_rounding:
+    MIRBuilder.buildGetRounding(getOrCreateVReg(CI));
+    return true;
   case Intrinsic::vscale: {
     MIRBuilder.buildVScale(getOrCreateVReg(CI), 1);
     return true;
@@ -2777,11 +2768,8 @@ bool IRTranslator::translateCall(const User &U, MachineIRBuilder &MIRBuilder) {
 
   diagnoseDontCall(CI);
 
-  Intrinsic::ID ID = Intrinsic::not_intrinsic;
-  if (F && F->isIntrinsic())
-    ID = F->getIntrinsicID();
-
-  if (!F || !F->isIntrinsic() || ID == Intrinsic::not_intrinsic)
+  Intrinsic::ID ID = F ? F->getIntrinsicID() : Intrinsic::not_intrinsic;
+  if (!F || ID == Intrinsic::not_intrinsic)
     return translateCallBase(CI, MIRBuilder);
 
   assert(ID != Intrinsic::not_intrinsic && "unknown intrinsic");
@@ -2847,8 +2835,9 @@ bool IRTranslator::translateCall(const User &U, MachineIRBuilder &MIRBuilder) {
       MPI = MachinePointerInfo(Info.ptrVal, Info.offset);
     else if (Info.fallbackAddressSpace)
       MPI = MachinePointerInfo(*Info.fallbackAddressSpace);
-    MIB.addMemOperand(
-        MF->getMachineMemOperand(MPI, Info.flags, MemTy, Alignment, CI.getAAMetadata()));
+    MIB.addMemOperand(MF->getMachineMemOperand(
+        MPI, Info.flags, MemTy, Alignment, CI.getAAMetadata(),
+        /*Ranges=*/nullptr, Info.ssid, Info.order, Info.failureOrder));
   }
 
   if (CI.isConvergent()) {

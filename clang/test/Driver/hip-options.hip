@@ -115,11 +115,6 @@
 // OMP-NOT: "-cc1"{{.*}} "-triple" "amdgcn-amd-amdhsa" {{.*}} "-fopenmp"
 // OMP: "-cc1"{{.*}} "-triple" "x86_64-unknown-linux-gnu" {{.*}} "-fopenmp"
 
-// RUN: not %clang --target=x86_64-unknown-linux-gnu -nogpuinc -nogpulib \
-// RUN:   --offload-arch=gfx906 -fopenmp=libomp -fopenmp-targets=amdgcn %s 2>&1 \
-// RUN:   | FileCheck -check-prefix=OMPTGT %s
-// OMPTGT: unsupported option '-fopenmp-targets=' for language mode 'HIP'
-
 // Check -Xoffload-linker option is passed to lld.
 
 // RUN: %clang -### --target=x86_64-unknown-linux-gnu -nogpuinc -nogpulib \
@@ -259,9 +254,3 @@
 // RUN:   --offload-arch=gfx1100 --offload-new-driver --offload-jobs=0x4 %s 2>&1 | \
 // RUN:   FileCheck -check-prefix=INVJOBS %s
 // INVJOBS: clang: error: invalid integral value '0x4' in '--offload-jobs=0x4'
-
-// Check that internalization is enabled for offloading on AMDGPU.
-// RUN: %clang -### -Werror --target=x86_64-unknown-linux-gnu -nogpuinc -nogpulib \
-// RUN:   --offload-arch=gfx1100 --offload-new-driver %s 2>&1 | \
-// RUN:   FileCheck -check-prefix=INTERNALIZATION %s
-// INTERNALIZATION: --device-linker=amdgcn-amd-amdhsa=-plugin-opt=-amdgpu-internalize-symbols
