@@ -38,7 +38,7 @@ jobs:
       LLVM_VERSION_PATCH: ${{ steps.version.outputs.patch }}
     steps:
       - name: Checkout source
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
         with:
           fetch-depth: 250
 
@@ -104,7 +104,7 @@ jobs:
       - name: Install Ninja
         uses: llvm/actions/install-ninja@42d80571b13f4599bbefbc7189728b64723c7f78 # main
       - name: Download source code
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
         with:
           ref: ${{ matrix.ref }}
           repository: ${{ matrix.repo }}
