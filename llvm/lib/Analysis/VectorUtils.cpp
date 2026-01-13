@@ -81,6 +81,7 @@ bool llvm::isTriviallyVectorizable(Intrinsic::ID ID) {
   case Intrinsic::exp:
   case Intrinsic::exp10:
   case Intrinsic::exp2:
+  case Intrinsic::ldexp:
   case Intrinsic::log:
   case Intrinsic::log10:
   case Intrinsic::log2:
@@ -108,6 +109,8 @@ bool llvm::isTriviallyVectorizable(Intrinsic::ID ID) {
   case Intrinsic::canonicalize:
   case Intrinsic::fptosi_sat:
   case Intrinsic::fptoui_sat:
+  case Intrinsic::lround:
+  case Intrinsic::llround:
   case Intrinsic::lrint:
   case Intrinsic::llrint:
   case Intrinsic::ucmp:
@@ -163,6 +166,7 @@ bool llvm::isVectorIntrinsicWithScalarOpAtArg(Intrinsic::ID ID,
   case Intrinsic::is_fpclass:
   case Intrinsic::vp_is_fpclass:
   case Intrinsic::powi:
+  case Intrinsic::vector_extract:
     return (ScalarOpdIdx == 1);
   case Intrinsic::smul_fix:
   case Intrinsic::smul_fix_sat:
@@ -189,12 +193,15 @@ bool llvm::isVectorIntrinsicWithOverloadTypeAtArg(
   switch (ID) {
   case Intrinsic::fptosi_sat:
   case Intrinsic::fptoui_sat:
+  case Intrinsic::lround:
+  case Intrinsic::llround:
   case Intrinsic::lrint:
   case Intrinsic::llrint:
   case Intrinsic::vp_lrint:
   case Intrinsic::vp_llrint:
   case Intrinsic::ucmp:
   case Intrinsic::scmp:
+  case Intrinsic::vector_extract:
     return OpdIdx == -1 || OpdIdx == 0;
   case Intrinsic::modf:
   case Intrinsic::sincos:
@@ -203,6 +210,7 @@ bool llvm::isVectorIntrinsicWithOverloadTypeAtArg(
   case Intrinsic::vp_is_fpclass:
     return OpdIdx == 0;
   case Intrinsic::powi:
+  case Intrinsic::ldexp:
     return OpdIdx == -1 || OpdIdx == 1;
   default:
     return OpdIdx == -1;
@@ -1379,9 +1387,9 @@ void InterleavedAccessInfo::collectConstStrideAccesses(
       // wrap around the address space we would do a memory access at nullptr
       // even without the transformation. The wrapping checks are therefore
       // deferred until after we've formed the interleaved groups.
-      int64_t Stride =
-        getPtrStride(PSE, ElementTy, Ptr, TheLoop, Strides,
-                     /*Assume=*/true, /*ShouldCheckWrap=*/false).value_or(0);
+      int64_t Stride = getPtrStride(PSE, ElementTy, Ptr, TheLoop, *DT, Strides,
+                                    /*Assume=*/true, /*ShouldCheckWrap=*/false)
+                           .value_or(0);
 
       const SCEV *Scev = replaceSymbolicStrideSCEV(PSE, Strides, Ptr);
       AccessStrideInfo[&I] = StrideDescriptor(Stride, Scev, Size,
@@ -1635,8 +1643,9 @@ void InterleavedAccessInfo::analyzeInterleaving(
     assert(Member && "Group member does not exist");
     Value *MemberPtr = getLoadStorePointerOperand(Member);
     Type *AccessTy = getLoadStoreType(Member);
-    if (getPtrStride(PSE, AccessTy, MemberPtr, TheLoop, Strides,
-                     /*Assume=*/false, /*ShouldCheckWrap=*/true).value_or(0))
+    if (getPtrStride(PSE, AccessTy, MemberPtr, TheLoop, *DT, Strides,
+                     /*Assume=*/false, /*ShouldCheckWrap=*/true)
+            .value_or(0))
       return false;
     LLVM_DEBUG(dbgs() << "LV: Invalidate candidate interleaved group due to "
                       << FirstOrLast
