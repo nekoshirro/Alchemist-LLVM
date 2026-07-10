@@ -987,7 +987,7 @@ private:
       // The target function may have implicit code paths beyond the
       // body: member and base destructors. Visit these first.
       if (auto *Dtor = dyn_cast<CXXDestructorDecl>(CurrentCaller.CDecl))
-        followDestructor(dyn_cast<CXXRecordDecl>(Dtor->getParent()), Dtor);
+        followDestructor(Dtor->getParent(), Dtor);
 
       if (auto *FD = dyn_cast<FunctionDecl>(CurrentCaller.CDecl)) {
         TrailingRequiresClause = FD->getTrailingRequiresClause().ConstraintExpr;
@@ -1095,9 +1095,8 @@ private:
       for (const FieldDecl *Field : Rec->fields())
         followTypeDtor(Field->getType(), DtorLoc);
 
-      if (const auto *Class = dyn_cast<CXXRecordDecl>(Rec))
-        for (const CXXBaseSpecifier &Base : Class->bases())
-          followTypeDtor(Base.getType(), DtorLoc);
+      for (const CXXBaseSpecifier &Base : Rec->bases())
+        followTypeDtor(Base.getType(), DtorLoc);
     }
 
     void followTypeDtor(QualType QT, SourceLocation CallSite) {
@@ -1299,6 +1298,14 @@ private:
       // should suffice.
       if (Statement != TrailingRequiresClause && Statement != NoexceptExpr)
         return DynamicRecursiveASTVisitor::TraverseStmt(Statement);
+      return true;
+    }
+
+    bool TraverseCXXRecordDecl(CXXRecordDecl *D) override {
+      // Completely skip local struct/class/union declarations since their
+      // methods would otherwise be incorrectly interpreted as part of the
+      // function we are currently traversing. The initial Sema pass will have
+      // already recorded any nonblocking methods needing analysis.
       return true;
     }
 

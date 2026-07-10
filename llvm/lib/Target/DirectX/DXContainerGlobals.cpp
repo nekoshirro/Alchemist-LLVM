@@ -29,7 +29,6 @@
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 #include <cstdint>
-#include <optional>
 
 using namespace llvm;
 using namespace llvm::dxil;
@@ -195,10 +194,10 @@ void DXContainerGlobals::addResourcesForPSV(Module &M, PSVRuntimeInfo &PSV) {
         BindInfo.Type = Type;
         BindInfo.LowerBound = Binding.LowerBound;
         assert(
-            (Binding.Size == UINT32_MAX ||
+            (Binding.Size == 0 ||
              (uint64_t)Binding.LowerBound + Binding.Size - 1 <= UINT32_MAX) &&
             "Resource range is too large");
-        BindInfo.UpperBound = (Binding.Size == UINT32_MAX)
+        BindInfo.UpperBound = (Binding.Size == 0)
                                   ? UINT32_MAX
                                   : Binding.LowerBound + Binding.Size - 1;
         BindInfo.Space = Binding.Space;
@@ -285,6 +284,13 @@ void DXContainerGlobals::addPipelineStateValidationInfo(
     PSV.BaseData.NumThreadsX = MMI.EntryPropertyVec[0].NumThreadsX;
     PSV.BaseData.NumThreadsY = MMI.EntryPropertyVec[0].NumThreadsY;
     PSV.BaseData.NumThreadsZ = MMI.EntryPropertyVec[0].NumThreadsZ;
+    if (MMI.EntryPropertyVec[0].WaveSizeMin) {
+      PSV.BaseData.MinimumWaveLaneCount = MMI.EntryPropertyVec[0].WaveSizeMin;
+      PSV.BaseData.MaximumWaveLaneCount =
+          MMI.EntryPropertyVec[0].WaveSizeMax
+              ? MMI.EntryPropertyVec[0].WaveSizeMax
+              : MMI.EntryPropertyVec[0].WaveSizeMin;
+    }
     break;
   default:
     break;
