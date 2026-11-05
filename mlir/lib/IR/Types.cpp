@@ -1,186 +1,127 @@
 //===- Types.cpp - MLIR Type Classes --------------------------------------===//
 //
-// Copyright 2019 The MLIR Authors.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
-#include "mlir/IR/Types.h"
-#include "TypeDetail.h"
-#include "mlir/IR/AffineMap.h"
-#include "mlir/Support/STLExtras.h"
-#include "llvm/Support/raw_ostream.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Dialect.h"
 
 using namespace mlir;
 using namespace mlir::detail;
 
-Type::Kind Type::getKind() const { return type->kind; }
+//===----------------------------------------------------------------------===//
+// AbstractType
+//===----------------------------------------------------------------------===//
 
-MLIRContext *Type::getContext() const { return type->context; }
-
-unsigned Type::getBitWidth() const {
-  switch (getKind()) {
-    // TODO: Currently the IR uses host double type to store all the float
-    // datatypes. This is completely incorrect for BF16 and other datatypes.
-    // We have to fix this once APFloat is used in the IR.
-  case Type::Kind::BF16:
-  case Type::Kind::F16:
-  case Type::Kind::F32:
-  case Type::Kind::F64:
-    return 64;
-  case Type::Kind::Integer:
-    return cast<IntegerType>().getWidth();
-  case Type::Kind::Vector:
-  case Type::Kind::RankedTensor:
-  case Type::Kind::UnrankedTensor:
-    return cast<VectorOrTensorType>().getElementType().getBitWidth();
-    // TODO: Handle more types.
-  default:
-    llvm_unreachable("unexpected type");
-  }
+void AbstractType::walkImmediateSubElements(
+    Type type, function_ref<void(Attribute)> walkAttrsFn,
+    function_ref<void(Type)> walkTypesFn) const {
+  walkImmediateSubElementsFn(type, walkAttrsFn, walkTypesFn);
 }
 
-unsigned Type::getSubclassData() const { return type->getSubclassData(); }
-void Type::setSubclassData(unsigned val) { type->setSubclassData(val); }
-
-IndexType::IndexType(Type::ImplType *ptr) : Type(ptr) {}
-
-IntegerType::IntegerType(Type::ImplType *ptr) : Type(ptr) {}
-
-unsigned IntegerType::getWidth() const {
-  return static_cast<ImplType *>(type)->width;
+Type AbstractType::replaceImmediateSubElements(Type type,
+                                               ArrayRef<Attribute> replAttrs,
+                                               ArrayRef<Type> replTypes) const {
+  return replaceImmediateSubElementsFn(type, replAttrs, replTypes);
 }
 
-FloatType::FloatType(Type::ImplType *ptr) : Type(ptr) {}
+//===----------------------------------------------------------------------===//
+// Type
+//===----------------------------------------------------------------------===//
 
-OtherType::OtherType(Type::ImplType *ptr) : Type(ptr) {}
+MLIRContext *Type::getContext() const { return getDialect().getContext(); }
 
-FunctionType::FunctionType(Type::ImplType *ptr) : Type(ptr) {}
+bool Type::isBF16() const { return llvm::isa<BFloat16Type>(*this); }
+bool Type::isF16() const { return llvm::isa<Float16Type>(*this); }
+bool Type::isTF32() const { return llvm::isa<FloatTF32Type>(*this); }
+bool Type::isF32() const { return llvm::isa<Float32Type>(*this); }
+bool Type::isF64() const { return llvm::isa<Float64Type>(*this); }
+bool Type::isF80() const { return llvm::isa<Float80Type>(*this); }
+bool Type::isF128() const { return llvm::isa<Float128Type>(*this); }
 
-ArrayRef<Type> FunctionType::getInputs() const {
-  return static_cast<ImplType *>(type)->getInputs();
+bool Type::isFloat() const { return llvm::isa<FloatType>(*this); }
+
+/// Return true if this is a float type with the specified width.
+bool Type::isFloat(unsigned width) const {
+  if (auto fltTy = llvm::dyn_cast<FloatType>(*this))
+    return fltTy.getWidth() == width;
+  return false;
 }
 
-unsigned FunctionType::getNumResults() const {
-  return static_cast<ImplType *>(type)->numResults;
+bool Type::isIndex() const { return llvm::isa<IndexType>(*this); }
+
+bool Type::isInteger() const { return llvm::isa<IntegerType>(*this); }
+
+bool Type::isInteger(unsigned width) const {
+  if (auto intTy = llvm::dyn_cast<IntegerType>(*this))
+    return intTy.getWidth() == width;
+  return false;
 }
 
-ArrayRef<Type> FunctionType::getResults() const {
-  return static_cast<ImplType *>(type)->getResults();
+bool Type::isSignlessInteger() const {
+  if (auto intTy = llvm::dyn_cast<IntegerType>(*this))
+    return intTy.isSignless();
+  return false;
 }
 
-VectorOrTensorType::VectorOrTensorType(Type::ImplType *ptr) : Type(ptr) {}
-
-Type VectorOrTensorType::getElementType() const {
-  return static_cast<ImplType *>(type)->elementType;
+bool Type::isSignlessInteger(unsigned width) const {
+  if (auto intTy = llvm::dyn_cast<IntegerType>(*this))
+    return intTy.isSignless() && intTy.getWidth() == width;
+  return false;
 }
 
-unsigned VectorOrTensorType::getNumElements() const {
-  switch (getKind()) {
-  case Kind::Vector:
-  case Kind::RankedTensor: {
-    auto shape = getShape();
-    unsigned num = 1;
-    for (auto dim : shape)
-      num *= dim;
-    return num;
-  }
-  default:
-    llvm_unreachable("not a VectorOrTensorType or not ranked");
-  }
+bool Type::isSignedInteger() const {
+  if (auto intTy = llvm::dyn_cast<IntegerType>(*this))
+    return intTy.isSigned();
+  return false;
 }
 
-/// If this is ranked tensor or vector type, return the rank. If it is an
-/// unranked tensor, return -1.
-int VectorOrTensorType::getRank() const {
-  switch (getKind()) {
-  case Kind::Vector:
-  case Kind::RankedTensor:
-    return getShape().size();
-  case Kind::UnrankedTensor:
-    return -1;
-  default:
-    llvm_unreachable("not a VectorOrTensorType");
-  }
+bool Type::isSignedInteger(unsigned width) const {
+  if (auto intTy = llvm::dyn_cast<IntegerType>(*this))
+    return intTy.isSigned() && intTy.getWidth() == width;
+  return false;
 }
 
-int VectorOrTensorType::getDimSize(unsigned i) const {
-  switch (getKind()) {
-  case Kind::Vector:
-  case Kind::RankedTensor:
-    return getShape()[i];
-  default:
-    llvm_unreachable("not a VectorOrTensorType or not ranked");
-  }
+bool Type::isUnsignedInteger() const {
+  if (auto intTy = llvm::dyn_cast<IntegerType>(*this))
+    return intTy.isUnsigned();
+  return false;
 }
 
-ArrayRef<int> VectorOrTensorType::getShape() const {
-  switch (getKind()) {
-  case Kind::Vector:
-    return cast<VectorType>().getShape();
-  case Kind::RankedTensor:
-    return cast<RankedTensorType>().getShape();
-  default:
-    llvm_unreachable("not a VectorOrTensorType or not ranked");
-  }
+bool Type::isUnsignedInteger(unsigned width) const {
+  if (auto intTy = llvm::dyn_cast<IntegerType>(*this))
+    return intTy.isUnsigned() && intTy.getWidth() == width;
+  return false;
 }
 
-bool VectorOrTensorType::hasStaticShape() const {
-  if (isa<UnrankedTensorType>())
-    return false;
-  auto dims = getShape();
-  return !std::any_of(dims.begin(), dims.end(), [](int i) { return i < 0; });
+bool Type::isSignlessIntOrIndex() const {
+  return isSignlessInteger() || llvm::isa<IndexType>(*this);
 }
 
-VectorType::VectorType(Type::ImplType *ptr) : VectorOrTensorType(ptr) {}
-
-ArrayRef<int> VectorType::getShape() const {
-  return static_cast<ImplType *>(type)->getShape();
+bool Type::isSignlessIntOrIndexOrFloat() const {
+  return isSignlessInteger() || llvm::isa<IndexType, FloatType>(*this);
 }
 
-TensorType::TensorType(Type::ImplType *ptr) : VectorOrTensorType(ptr) {}
-
-RankedTensorType::RankedTensorType(Type::ImplType *ptr) : TensorType(ptr) {}
-
-ArrayRef<int> RankedTensorType::getShape() const {
-  return static_cast<ImplType *>(type)->getShape();
+bool Type::isSignlessIntOrFloat() const {
+  return isSignlessInteger() || llvm::isa<FloatType>(*this);
 }
 
-UnrankedTensorType::UnrankedTensorType(Type::ImplType *ptr) : TensorType(ptr) {}
-
-MemRefType::MemRefType(Type::ImplType *ptr) : Type(ptr) {}
-
-ArrayRef<int> MemRefType::getShape() const {
-  return static_cast<ImplType *>(type)->getShape();
+bool Type::isIntOrIndex() const {
+  return llvm::isa<IntegerType>(*this) || isIndex();
 }
 
-Type MemRefType::getElementType() const {
-  return static_cast<ImplType *>(type)->elementType;
+bool Type::isIntOrFloat() const {
+  return llvm::isa<IntegerType, FloatType>(*this);
 }
 
-ArrayRef<AffineMap> MemRefType::getAffineMaps() const {
-  return static_cast<ImplType *>(type)->getAffineMaps();
-}
+bool Type::isIntOrIndexOrFloat() const { return isIntOrFloat() || isIndex(); }
 
-unsigned MemRefType::getMemorySpace() const {
-  return static_cast<ImplType *>(type)->memorySpace;
-}
-
-unsigned MemRefType::getNumDynamicDims() const {
-  unsigned numDynamicDims = 0;
-  for (int dimSize : getShape()) {
-    if (dimSize == -1)
-      ++numDynamicDims;
-  }
-  return numDynamicDims;
+unsigned Type::getIntOrFloatBitWidth() const {
+  assert(isIntOrFloat() && "only integers and floats have a bitwidth");
+  if (auto intType = llvm::dyn_cast<IntegerType>(*this))
+    return intType.getWidth();
+  return llvm::cast<FloatType>(*this).getWidth();
 }

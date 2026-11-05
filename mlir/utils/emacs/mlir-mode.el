@@ -1,7 +1,20 @@
 ;;; mlir-mode.el --- Major mode for the MLIR assembler language.
 
-;; Maintainer:
-;; Version: 0.0
+;; Copyright (C) 2019 The MLIR Authors.
+;;
+;; Licensed under the Apache License, Version 2.0 (the "License");
+;; you may not use this file except in compliance with the License.
+;; You may obtain a copy of the License at
+;;
+;;      http://www.apache.org/licenses/LICENSE-2.0
+;;
+;; Unless required by applicable law or agreed to in writing, software
+;; distributed under the License is distributed on an "AS IS" BASIS,
+;; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+;; See the License for the specific language governing permissions and
+;; limitations under the License.
+
+;; Version: 0.1.0
 
 ;;; Commentary:
 
@@ -42,7 +55,7 @@
    ;; Keywords
    `(,(regexp-opt
        '(;; Toplevel entities
-         "br" "ceildiv" "cfgfunc" "cond_br" "else" "extfunc" "false" "floordiv" "for" "if" "mlfunc" "mod" "return" "size" "step" "to" "true" "??" ) 'symbols) . font-lock-keyword-face))
+         "br" "ceildiv" "func" "cond_br" "else" "extfunc" "false" "floordiv" "for" "if" "mod" "return" "size" "step" "to" "true" "??" ) 'symbols) . font-lock-keyword-face))
   "Syntax highlighting for MLIR.")
 
 ;; Emacs 23 compatibility.
@@ -63,6 +76,26 @@
 ;;;###autoload
 (add-to-list 'auto-mode-alist (cons "\\.mlir\\'" 'mlir-mode))
 
-(provide 'mlir-mode)
+(defgroup mlir nil
+  "Major mode for editing MLIR source files."
+  :group 'languages
+  :prefix "mlir-")
 
+;; Set default value of opt-tool to use as mlir-opt.
+(defcustom mlir-opt "mlir-opt"
+  "Commandline MLIR opt tool to use."
+  :type 'string)
+
+;; Enable reading/writing .mlirbc files.
+(require 'jka-compr)
+(add-to-list 'jka-compr-compression-info-list
+  (vector "\\.mlirbc\\'"
+   "mlir-to-bytecode" mlir-opt (vector "--mlir-print-debuginfo" "--emit-bytecode" "-o" "-" "-")
+   "mlir-bytecode-to-text" mlir-opt (vector "--mlir-print-debuginfo")
+   nil nil "ML\357R"))
+(jka-compr-update)
+(auto-compression-mode t)
+(add-to-list 'auto-mode-alist (cons "\\.mlirbc\\'" 'mlir-mode))
+
+(provide 'mlir-mode)
 ;;; mlir-mode.el ends here

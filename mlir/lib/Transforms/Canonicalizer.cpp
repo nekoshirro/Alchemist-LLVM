@@ -1,64 +1,86 @@
 //===- Canonicalizer.cpp - Canonicalize MLIR operations -------------------===//
 //
-// Copyright 2019 The MLIR Authors.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 //
 // This transformation pass converts operations into their canonical forms by
 // folding constants, applying operation identity transformations etc.
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/IR/MLIRContext.h"
-#include "mlir/IR/PatternMatch.h"
-#include "mlir/Pass.h"
 #include "mlir/Transforms/Passes.h"
+
+#include "mlir/Dialect/UB/IR/UBOps.h"
+#include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+
+namespace mlir {
+#define GEN_PASS_DEF_CANONICALIZER
+#include "mlir/Transforms/Passes.h.inc"
+} // namespace mlir
+
 using namespace mlir;
 
-//===----------------------------------------------------------------------===//
-// The actual Canonicalizer Pass.
-//===----------------------------------------------------------------------===//
-
 namespace {
+/// Canonicalize operations in nested regions.
+struct Canonicalizer : public impl::CanonicalizerBase<Canonicalizer> {
+  Canonicalizer() = default;
+  Canonicalizer(const GreedyRewriteConfig &config,
+                ArrayRef<std::string> disabledPatterns,
+                ArrayRef<std::string> enabledPatterns)
+      : config(config) {
+    this->topDownProcessingEnabled = config.getUseTopDownTraversal();
+    this->regionSimplifyLevel = config.getRegionSimplificationLevel();
+    this->maxIterations = config.getMaxIterations();
+    this->maxNumRewrites = config.getMaxNumRewrites();
+    this->disabledPatterns = disabledPatterns;
+    this->enabledPatterns = enabledPatterns;
+  }
 
-/// Canonicalize operations in functions.
-struct Canonicalizer : public FunctionPass {
-  Canonicalizer() : FunctionPass(&Canonicalizer::passID) {}
-  PassResult runOnFunction(Function *fn) override;
+  /// Initialize the canonicalizer by building the set of patterns used during
+  /// execution.
+  LogicalResult initialize(MLIRContext *context) override {
+    // Set the config from possible pass options set in the meantime.
+    config.setUseTopDownTraversal(topDownProcessingEnabled);
+    config.setRegionSimplificationLevel(regionSimplifyLevel);
+    config.setMaxIterations(maxIterations);
+    config.setMaxNumRewrites(maxNumRewrites);
 
-  static char passID;
+    RewritePatternSet owningPatterns(context);
+    for (auto *dialect : context->getLoadedDialects())
+      dialect->getCanonicalizationPatterns(owningPatterns);
+    for (RegisteredOperationName op : context->getRegisteredOperations())
+      op.getCanonicalizationPatterns(owningPatterns, context);
+
+    patterns = std::make_shared<FrozenRewritePatternSet>(
+        std::move(owningPatterns), disabledPatterns, enabledPatterns);
+    return success();
+  }
+  void runOnOperation() override {
+    LogicalResult converged =
+        applyPatternsGreedily(getOperation(), *patterns, config);
+    // Canonicalization is best-effort. Non-convergence is not a pass failure.
+    if (testConvergence && failed(converged))
+      signalPassFailure();
+  }
+  GreedyRewriteConfig config;
+  std::shared_ptr<const FrozenRewritePatternSet> patterns;
 };
-} // end anonymous namespace
-
-char Canonicalizer::passID = 0;
-
-PassResult Canonicalizer::runOnFunction(Function *fn) {
-  auto *context = fn->getContext();
-  OwningPatternList patterns;
-
-  // TODO: Instead of adding all known patterns from the whole system lazily add
-  // and cache the canonicalization patterns for ops we see in practice when
-  // building the worklist.  For now, we just grab everything.
-  for (auto *op : fn->getContext()->getRegisteredOperations())
-    op->getCanonicalizationPatterns(patterns, context);
-
-  applyPatternsGreedily(fn, std::move(patterns));
-  return success();
-}
+} // namespace
 
 /// Create a Canonicalizer pass.
-FunctionPass *mlir::createCanonicalizerPass() { return new Canonicalizer(); }
+std::unique_ptr<Pass> mlir::createCanonicalizerPass() {
+  return std::make_unique<Canonicalizer>();
+}
 
-static PassRegistration<Canonicalizer> pass("canonicalize",
-                                            "Canonicalize operations");
+/// Creates an instance of the Canonicalizer pass with the specified config.
+std::unique_ptr<Pass>
+mlir::createCanonicalizerPass(const GreedyRewriteConfig &config,
+                              ArrayRef<std::string> disabledPatterns,
+                              ArrayRef<std::string> enabledPatterns) {
+  return std::make_unique<Canonicalizer>(config, disabledPatterns,
+                                         enabledPatterns);
+}

@@ -1,1776 +1,1226 @@
 //===- MLIRContext.cpp - MLIR Type Classes --------------------------------===//
 //
-// Copyright 2019 The MLIR Authors.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 #include "mlir/IR/MLIRContext.h"
 #include "AffineExprDetail.h"
 #include "AffineMapDetail.h"
 #include "AttributeDetail.h"
-#include "AttributeListStorage.h"
 #include "IntegerSetDetail.h"
-#include "LocationDetail.h"
 #include "TypeDetail.h"
+#include "mlir/IR/Action.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Attributes.h"
-#include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/Function.h"
-#include "mlir/IR/Identifier.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinDialect.h"
+#include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/Dialect.h"
+#include "mlir/IR/ExtensibleDialect.h"
 #include "mlir/IR/IntegerSet.h"
 #include "mlir/IR/Location.h"
-#include "mlir/IR/Types.h"
-#include "mlir/Support/MathExtras.h"
-#include "mlir/Support/STLExtras.h"
-#include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/SetVector.h"
-#include "llvm/ADT/StringMap.h"
+#include "mlir/IR/OpImplementation.h"
+#include "mlir/IR/OperationSupport.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Support/Allocator.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Compiler.h"
+#include "llvm/Support/Debug.h"
+#include "llvm/Support/ManagedStatic.h"
+#include "llvm/Support/Mutex.h"
+#include "llvm/Support/RWMutex.h"
+#include "llvm/Support/ThreadPool.h"
 #include "llvm/Support/raw_ostream.h"
 #include <memory>
+#include <optional>
+
+#define DEBUG_TYPE "mlircontext"
 
 using namespace mlir;
 using namespace mlir::detail;
-using namespace llvm;
+
+//===----------------------------------------------------------------------===//
+// MLIRContext CommandLine Options
+//===----------------------------------------------------------------------===//
 
 namespace {
-struct FunctionTypeKeyInfo : DenseMapInfo<FunctionTypeStorage *> {
-  // Functions are uniqued based on their inputs and results.
-  using KeyTy = std::pair<ArrayRef<Type>, ArrayRef<Type>>;
-  using DenseMapInfo<FunctionTypeStorage *>::getHashValue;
-  using DenseMapInfo<FunctionTypeStorage *>::isEqual;
+/// This struct contains command line options that can be used to initialize
+/// various bits of an MLIRContext. This uses a struct wrapper to avoid the need
+/// for global command line options.
+struct MLIRContextOptions {
+  llvm::cl::opt<bool> disableThreading{
+      "mlir-disable-threading",
+      llvm::cl::desc("Disable multi-threading within MLIR, overrides any "
+                     "further call to MLIRContext::enableMultiThreading()")};
 
-  static unsigned getHashValue(KeyTy key) {
-    return hash_combine(
-        hash_combine_range(key.first.begin(), key.first.end()),
-        hash_combine_range(key.second.begin(), key.second.end()));
-  }
+  llvm::cl::opt<bool> printOpOnDiagnostic{
+      "mlir-print-op-on-diagnostic",
+      llvm::cl::desc("When a diagnostic is emitted on an operation, also print "
+                     "the operation as an attached note"),
+      llvm::cl::init(true)};
 
-  static bool isEqual(const KeyTy &lhs, const FunctionTypeStorage *rhs) {
-    if (rhs == getEmptyKey() || rhs == getTombstoneKey())
-      return false;
-    return lhs == KeyTy(rhs->getInputs(), rhs->getResults());
-  }
+  llvm::cl::opt<bool> printStackTraceOnDiagnostic{
+      "mlir-print-stacktrace-on-diagnostic",
+      llvm::cl::desc("When a diagnostic is emitted, also print the stack trace "
+                     "as an attached note")};
 };
+} // namespace
 
-struct AffineMapKeyInfo : DenseMapInfo<AffineMap> {
-  // Affine maps are uniqued based on their dim/symbol counts and affine
-  // expressions.
-  using KeyTy = std::tuple<unsigned, unsigned, ArrayRef<AffineExpr>,
-                           ArrayRef<AffineExpr>>;
-  using DenseMapInfo<AffineMap>::getHashValue;
-  using DenseMapInfo<AffineMap>::isEqual;
+static llvm::ManagedStatic<MLIRContextOptions> clOptions;
 
-  static unsigned getHashValue(KeyTy key) {
-    return hash_combine(
-        std::get<0>(key), std::get<1>(key),
-        hash_combine_range(std::get<2>(key).begin(), std::get<2>(key).end()),
-        hash_combine_range(std::get<3>(key).begin(), std::get<3>(key).end()));
+static bool isThreadingGloballyDisabled() {
+#if LLVM_ENABLE_THREADS != 0
+  return clOptions.isConstructed() && clOptions->disableThreading;
+#else
+  return true;
+#endif
+}
+
+/// Register a set of useful command-line options that can be used to configure
+/// various flags within the MLIRContext. These flags are used when constructing
+/// an MLIR context for initialization.
+void mlir::registerMLIRContextCLOptions() {
+  // Make sure that the options struct has been initialized.
+  *clOptions;
+}
+
+//===----------------------------------------------------------------------===//
+// Locking Utilities
+//===----------------------------------------------------------------------===//
+
+namespace {
+/// Utility writer lock that takes a runtime flag that specifies if we really
+/// need to lock.
+struct ScopedWriterLock {
+  ScopedWriterLock(llvm::sys::SmartRWMutex<true> &mutexParam, bool shouldLock)
+      : mutex(shouldLock ? &mutexParam : nullptr) {
+    if (mutex)
+      mutex->lock();
   }
-
-  static bool isEqual(const KeyTy &lhs, AffineMap rhs) {
-    if (rhs == getEmptyKey() || rhs == getTombstoneKey())
-      return false;
-    return lhs == std::make_tuple(rhs.getNumDims(), rhs.getNumSymbols(),
-                                  rhs.getResults(), rhs.getRangeSizes());
+  ~ScopedWriterLock() {
+    if (mutex)
+      mutex->unlock();
   }
+  llvm::sys::SmartRWMutex<true> *mutex;
 };
+} // namespace
 
-struct IntegerSetKeyInfo : DenseMapInfo<IntegerSet> {
-  // Integer sets are uniqued based on their dim/symbol counts, affine
-  // expressions appearing in the LHS of constraints, and eqFlags.
-  using KeyTy =
-      std::tuple<unsigned, unsigned, ArrayRef<AffineExpr>, ArrayRef<bool>>;
-  using DenseMapInfo<IntegerSet>::getHashValue;
-  using DenseMapInfo<IntegerSet>::isEqual;
-
-  static unsigned getHashValue(KeyTy key) {
-    return hash_combine(
-        std::get<0>(key), std::get<1>(key),
-        hash_combine_range(std::get<2>(key).begin(), std::get<2>(key).end()),
-        hash_combine_range(std::get<3>(key).begin(), std::get<3>(key).end()));
-  }
-
-  static bool isEqual(const KeyTy &lhs, IntegerSet rhs) {
-    if (rhs == getEmptyKey() || rhs == getTombstoneKey())
-      return false;
-    return lhs == std::make_tuple(rhs.getNumDims(), rhs.getNumSymbols(),
-                                  rhs.getConstraints(), rhs.getEqFlags());
-  }
-};
-
-struct VectorTypeKeyInfo : DenseMapInfo<VectorTypeStorage *> {
-  // Vectors are uniqued based on their element type and shape.
-  using KeyTy = std::pair<Type, ArrayRef<int>>;
-  using DenseMapInfo<VectorTypeStorage *>::getHashValue;
-  using DenseMapInfo<VectorTypeStorage *>::isEqual;
-
-  static unsigned getHashValue(KeyTy key) {
-    return hash_combine(
-        DenseMapInfo<Type>::getHashValue(key.first),
-        hash_combine_range(key.second.begin(), key.second.end()));
-  }
-
-  static bool isEqual(const KeyTy &lhs, const VectorTypeStorage *rhs) {
-    if (rhs == getEmptyKey() || rhs == getTombstoneKey())
-      return false;
-    return lhs == KeyTy(rhs->elementType, rhs->getShape());
-  }
-};
-
-struct RankedTensorTypeKeyInfo : DenseMapInfo<RankedTensorTypeStorage *> {
-  // Ranked tensors are uniqued based on their element type and shape.
-  using KeyTy = std::pair<Type, ArrayRef<int>>;
-  using DenseMapInfo<RankedTensorTypeStorage *>::getHashValue;
-  using DenseMapInfo<RankedTensorTypeStorage *>::isEqual;
-
-  static unsigned getHashValue(KeyTy key) {
-    return hash_combine(
-        DenseMapInfo<Type>::getHashValue(key.first),
-        hash_combine_range(key.second.begin(), key.second.end()));
-  }
-
-  static bool isEqual(const KeyTy &lhs, const RankedTensorTypeStorage *rhs) {
-    if (rhs == getEmptyKey() || rhs == getTombstoneKey())
-      return false;
-    return lhs == KeyTy(rhs->elementType, rhs->getShape());
-  }
-};
-
-struct MemRefTypeKeyInfo : DenseMapInfo<MemRefTypeStorage *> {
-  // MemRefs are uniqued based on their element type, shape, affine map
-  // composition, and memory space.
-  using KeyTy = std::tuple<Type, ArrayRef<int>, ArrayRef<AffineMap>, unsigned>;
-  using DenseMapInfo<MemRefTypeStorage *>::getHashValue;
-  using DenseMapInfo<MemRefTypeStorage *>::isEqual;
-
-  static unsigned getHashValue(KeyTy key) {
-    return hash_combine(
-        DenseMapInfo<Type>::getHashValue(std::get<0>(key)),
-        hash_combine_range(std::get<1>(key).begin(), std::get<1>(key).end()),
-        hash_combine_range(std::get<2>(key).begin(), std::get<2>(key).end()),
-        std::get<3>(key));
-  }
-
-  static bool isEqual(const KeyTy &lhs, const MemRefTypeStorage *rhs) {
-    if (rhs == getEmptyKey() || rhs == getTombstoneKey())
-      return false;
-    return lhs == std::make_tuple(rhs->elementType, rhs->getShape(),
-                                  rhs->getAffineMaps(), rhs->memorySpace);
-  }
-};
-
-struct FloatAttrKeyInfo : DenseMapInfo<FloatAttributeStorage *> {
-  // Float attributes are uniqued based on wrapped APFloat.
-  using KeyTy = std::pair<Type, APFloat>;
-  using DenseMapInfo<FloatAttributeStorage *>::getHashValue;
-  using DenseMapInfo<FloatAttributeStorage *>::isEqual;
-
-  static unsigned getHashValue(KeyTy key) {
-    return hash_combine(key.first, llvm::hash_value(key.second));
-  }
-
-  static bool isEqual(const KeyTy &lhs, const FloatAttributeStorage *rhs) {
-    if (rhs == getEmptyKey() || rhs == getTombstoneKey())
-      return false;
-    return lhs.first == rhs->type && lhs.second.bitwiseIsEqual(rhs->getValue());
-  }
-};
-
-struct IntegerAttrKeyInfo : DenseMapInfo<IntegerAttributeStorage *> {
-  // Integer attributes are uniqued based on wrapped APInt.
-  using KeyTy = std::pair<Type, APInt>;
-  using DenseMapInfo<IntegerAttributeStorage *>::getHashValue;
-  using DenseMapInfo<IntegerAttributeStorage *>::isEqual;
-
-  static unsigned getHashValue(KeyTy key) {
-    return hash_combine(key.first, llvm::hash_value(key.second));
-  }
-
-  static bool isEqual(const KeyTy &lhs, const IntegerAttributeStorage *rhs) {
-    if (rhs == getEmptyKey() || rhs == getTombstoneKey())
-      return false;
-    assert(lhs.first.isIndex() ||
-           (lhs.first.getBitWidth() == lhs.second.getBitWidth()));
-    return lhs.first == rhs->type && lhs.second == rhs->getValue();
-  }
-};
-
-struct ArrayAttrKeyInfo : DenseMapInfo<ArrayAttributeStorage *> {
-  // Array attributes are uniqued based on their elements.
-  using KeyTy = ArrayRef<Attribute>;
-  using DenseMapInfo<ArrayAttributeStorage *>::getHashValue;
-  using DenseMapInfo<ArrayAttributeStorage *>::isEqual;
-
-  static unsigned getHashValue(KeyTy key) {
-    return hash_combine_range(key.begin(), key.end());
-  }
-
-  static bool isEqual(const KeyTy &lhs, const ArrayAttributeStorage *rhs) {
-    if (rhs == getEmptyKey() || rhs == getTombstoneKey())
-      return false;
-    return lhs == rhs->value;
-  }
-};
-
-struct AttributeListKeyInfo : DenseMapInfo<AttributeListStorage *> {
-  // Array attributes are uniqued based on their elements.
-  using KeyTy = ArrayRef<NamedAttribute>;
-  using DenseMapInfo<AttributeListStorage *>::getHashValue;
-  using DenseMapInfo<AttributeListStorage *>::isEqual;
-
-  static unsigned getHashValue(KeyTy key) {
-    return hash_combine_range(key.begin(), key.end());
-  }
-
-  static bool isEqual(const KeyTy &lhs, const AttributeListStorage *rhs) {
-    if (rhs == getEmptyKey() || rhs == getTombstoneKey())
-      return false;
-    return lhs == rhs->getElements();
-  }
-};
-
-struct DenseElementsAttrInfo : DenseMapInfo<DenseElementsAttributeStorage *> {
-  using KeyTy = std::pair<VectorOrTensorType, ArrayRef<char>>;
-  using DenseMapInfo<DenseElementsAttributeStorage *>::getHashValue;
-  using DenseMapInfo<DenseElementsAttributeStorage *>::isEqual;
-
-  static unsigned getHashValue(KeyTy key) {
-    return hash_combine(
-        key.first, hash_combine_range(key.second.begin(), key.second.end()));
-  }
-
-  static bool isEqual(const KeyTy &lhs,
-                      const DenseElementsAttributeStorage *rhs) {
-    if (rhs == getEmptyKey() || rhs == getTombstoneKey())
-      return false;
-    return lhs == std::make_pair(rhs->type, rhs->data);
-  }
-};
-
-struct OpaqueElementsAttrInfo : DenseMapInfo<OpaqueElementsAttributeStorage *> {
-  using KeyTy = std::pair<VectorOrTensorType, StringRef>;
-  using DenseMapInfo<OpaqueElementsAttributeStorage *>::getHashValue;
-  using DenseMapInfo<OpaqueElementsAttributeStorage *>::isEqual;
-
-  static unsigned getHashValue(KeyTy key) {
-    return hash_combine(
-        key.first, hash_combine_range(key.second.begin(), key.second.end()));
-  }
-
-  static bool isEqual(const KeyTy &lhs,
-                      const OpaqueElementsAttributeStorage *rhs) {
-    if (rhs == getEmptyKey() || rhs == getTombstoneKey())
-      return false;
-    return lhs == std::make_pair(rhs->type, rhs->bytes);
-  }
-};
-
-struct FusedLocKeyInfo : DenseMapInfo<FusedLocationStorage *> {
-  // Fused locations are uniqued based on their held locations and an optional
-  // metadata attribute.
-  using KeyTy = std::pair<ArrayRef<Location>, Attribute>;
-  using DenseMapInfo<FusedLocationStorage *>::getHashValue;
-  using DenseMapInfo<FusedLocationStorage *>::isEqual;
-
-  static unsigned getHashValue(KeyTy key) {
-    return hash_combine(hash_combine_range(key.first.begin(), key.first.end()),
-                        key.second);
-  }
-
-  static bool isEqual(const KeyTy &lhs, const FusedLocationStorage *rhs) {
-    if (rhs == getEmptyKey() || rhs == getTombstoneKey())
-      return false;
-    return lhs == std::make_pair(rhs->getLocations(), rhs->metadata);
-  }
-};
-} // end anonymous namespace.
+//===----------------------------------------------------------------------===//
+// MLIRContextImpl
+//===----------------------------------------------------------------------===//
 
 namespace mlir {
 /// This is the implementation of the MLIRContext class, using the pImpl idiom.
 /// This class is completely private to this file, so everything is public.
 class MLIRContextImpl {
 public:
-  /// We put location info into this allocator, since it is generally not
-  /// touched by compiler passes.
-  llvm::BumpPtrAllocator locationAllocator;
+  //===--------------------------------------------------------------------===//
+  // Debugging
+  //===--------------------------------------------------------------------===//
 
-  /// The singleton for UnknownLoc.
-  UnknownLocationStorage *theUnknownLoc = nullptr;
+  /// An action handler for handling actions that are dispatched through this
+  /// context.
+  std::function<void(function_ref<void()>, const tracing::Action &)>
+      actionHandler;
 
-  /// These are filename locations uniqued into this MLIRContext.
-  llvm::StringMap<char, llvm::BumpPtrAllocator &> filenames;
+  //===--------------------------------------------------------------------===//
+  // Diagnostics
+  //===--------------------------------------------------------------------===//
+  DiagnosticEngine diagEngine;
 
-  /// FileLineColLoc uniquing.
-  DenseMap<std::tuple<const char *, unsigned, unsigned>,
-           FileLineColLocationStorage *>
-      fileLineColLocs;
+  //===--------------------------------------------------------------------===//
+  // Options
+  //===--------------------------------------------------------------------===//
 
-  /// FusedLoc uniquing.
-  using FusedLocations = DenseSet<FusedLocationStorage *, FusedLocKeyInfo>;
-  FusedLocations fusedLocs;
+  /// In most cases, creating operation in unregistered dialect is not desired
+  /// and indicate a misconfiguration of the compiler. This option enables to
+  /// detect such use cases
+  bool allowUnregisteredDialects = false;
 
-  /// We put immortal objects into this allocator.
-  llvm::BumpPtrAllocator allocator;
+  /// Enable support for multi-threading within MLIR.
+  bool threadingIsEnabled = true;
 
-  /// This is the handler to use to report diagnostics, or null if not
-  /// registered.
-  MLIRContext::DiagnosticHandlerTy diagnosticHandler;
+  /// Track if we are currently executing in a threaded execution environment
+  /// (like the pass-manager): this is only a debugging feature to help reducing
+  /// the chances of data races one some context APIs.
+#ifndef NDEBUG
+  std::atomic<int> multiThreadedExecutionContext{0};
+#endif
+
+  /// If the operation should be attached to diagnostics printed via the
+  /// Operation::emit methods.
+  bool printOpOnDiagnostic = true;
+
+  /// If the current stack trace should be attached when emitting diagnostics.
+  bool printStackTraceOnDiagnostic = false;
+
+  //===--------------------------------------------------------------------===//
+  // Other
+  //===--------------------------------------------------------------------===//
+
+  /// This points to the ThreadPool used when processing MLIR tasks in parallel.
+  /// It can't be nullptr when multi-threading is enabled. Otherwise if
+  /// multi-threading is disabled, and the threadpool wasn't externally provided
+  /// using `setThreadPool`, this will be nullptr.
+  llvm::ThreadPoolInterface *threadPool = nullptr;
+
+  /// In case where the thread pool is owned by the context, this ensures
+  /// destruction with the context.
+  std::unique_ptr<llvm::ThreadPoolInterface> ownedThreadPool;
+
+  /// An allocator used for AbstractAttribute and AbstractType objects.
+  llvm::BumpPtrAllocator abstractDialectSymbolAllocator;
+
+  /// This is a mapping from operation name to the operation info describing it.
+  llvm::StringMap<std::unique_ptr<OperationName::Impl>> operations;
+
+  /// A vector of operation info specifically for registered operations.
+  llvm::DenseMap<TypeID, RegisteredOperationName> registeredOperations;
+  llvm::StringMap<RegisteredOperationName> registeredOperationsByName;
+
+  /// This is a sorted container of registered operations for a deterministic
+  /// and efficient `getRegisteredOperations` implementation.
+  SmallVector<RegisteredOperationName, 0> sortedRegisteredOperations;
 
   /// This is a list of dialects that are created referring to this context.
-  /// The MLIRContext owns the objects.
-  std::vector<std::unique_ptr<Dialect>> dialects;
+  /// The MLIRContext owns the objects. These need to be declared after the
+  /// registered operations to ensure correct destruction order.
+  DenseMap<StringRef, std::unique_ptr<Dialect>> loadedDialects;
+  DialectRegistry dialectsRegistry;
 
-  /// This is a mapping from operation name to AbstractOperation for registered
-  /// operations.
-  StringMap<AbstractOperation> registeredOperations;
+  /// A mutex used when accessing operation information.
+  llvm::sys::SmartRWMutex<true> operationInfoMutex;
 
-  /// These are identifiers uniqued into this MLIRContext.
-  llvm::StringMap<char, llvm::BumpPtrAllocator &> identifiers;
+  //===--------------------------------------------------------------------===//
+  // Affine uniquing
+  //===--------------------------------------------------------------------===//
 
-  // Uniquing table for 'other' types.
-  OtherTypeStorage *otherTypes[int(Type::Kind::LAST_OTHER_TYPE) -
-                               int(Type::Kind::FIRST_OTHER_TYPE) + 1] = {
-      nullptr};
+  // Affine expression, map and integer set uniquing.
+  StorageUniquer affineUniquer;
 
-  // Uniquing table for 'float' types.
-  FloatTypeStorage *floatTypes[int(Type::Kind::LAST_FLOATING_POINT_TYPE) -
-                               int(Type::Kind::FIRST_FLOATING_POINT_TYPE) + 1] =
-      {nullptr};
+  //===--------------------------------------------------------------------===//
+  // Type uniquing
+  //===--------------------------------------------------------------------===//
 
-  // Affine map uniquing.
-  using AffineMapSet = DenseSet<AffineMap, AffineMapKeyInfo>;
-  AffineMapSet affineMaps;
+  DenseMap<TypeID, AbstractType *> registeredTypes;
+  StorageUniquer typeUniquer;
 
-  // Integer set uniquing.
-  using IntegerSets = DenseSet<IntegerSet, IntegerSetKeyInfo>;
-  IntegerSets integerSets;
+  /// This is a mapping from type name to the abstract type describing it.
+  /// It is used by `AbstractType::lookup` to get an `AbstractType` from a name.
+  /// As this map needs to be populated before `StringAttr` is loaded, we
+  /// cannot use `StringAttr` as the key. The context does not take ownership
+  /// of the key, so the `StringRef` must outlive the context.
+  llvm::DenseMap<StringRef, AbstractType *> nameToType;
 
-  // Affine binary op expression uniquing. Figure out uniquing of dimensional
-  // or symbolic identifiers.
-  DenseMap<std::tuple<unsigned, AffineExpr, AffineExpr>, AffineExpr>
-      affineExprs;
+  /// Cached Type Instances.
+  BFloat16Type bf16Ty;
+  Float16Type f16Ty;
+  FloatTF32Type tf32Ty;
+  Float32Type f32Ty;
+  Float64Type f64Ty;
+  Float80Type f80Ty;
+  Float128Type f128Ty;
+  IndexType indexTy;
+  IntegerType int1Ty, int8Ty, int16Ty, int32Ty, int64Ty, int128Ty;
+  NoneType noneType;
 
-  // Uniqui'ing of AffineDimExpr, AffineSymbolExpr's by their position.
-  std::vector<AffineDimExprStorage *> dimExprs;
-  std::vector<AffineSymbolExprStorage *> symbolExprs;
+  //===--------------------------------------------------------------------===//
+  // Attribute uniquing
+  //===--------------------------------------------------------------------===//
 
-  // Uniqui'ing of AffineConstantExprStorage using constant value as key.
-  DenseMap<int64_t, AffineConstantExprStorage *> constExprs;
+  DenseMap<TypeID, AbstractAttribute *> registeredAttributes;
+  StorageUniquer attributeUniquer;
 
-  /// Unique index type (lazily constructed).
-  IndexTypeStorage *indexType = nullptr;
+  /// This is a mapping from attribute name to the abstract attribute describing
+  /// it. It is used by `AbstractType::lookup` to get an `AbstractType` from a
+  /// name.
+  /// As this map needs to be populated before `StringAttr` is loaded, we
+  /// cannot use `StringAttr` as the key. The context does not take ownership
+  /// of the key, so the `StringRef` must outlive the context.
+  llvm::DenseMap<StringRef, AbstractAttribute *> nameToAttribute;
 
-  /// Integer type uniquing.
-  DenseMap<unsigned, IntegerTypeStorage *> integers;
+  /// Cached Attribute Instances.
+  BoolAttr falseAttr, trueAttr;
+  UnitAttr unitAttr;
+  UnknownLoc unknownLocAttr;
+  DictionaryAttr emptyDictionaryAttr;
+  StringAttr emptyStringAttr;
 
-  /// Function type uniquing.
-  using FunctionTypeSet = DenseSet<FunctionTypeStorage *, FunctionTypeKeyInfo>;
-  FunctionTypeSet functions;
+  /// Map of string attributes that may reference a dialect, that are awaiting
+  /// that dialect to be loaded.
+  llvm::sys::SmartMutex<true> dialectRefStrAttrMutex;
+  DenseMap<StringRef, SmallVector<StringAttrStorage *>>
+      dialectReferencingStrAttrs;
 
-  /// Vector type uniquing.
-  using VectorTypeSet = DenseSet<VectorTypeStorage *, VectorTypeKeyInfo>;
-  VectorTypeSet vectors;
-
-  /// Ranked tensor type uniquing.
-  using RankedTensorTypeSet =
-      DenseSet<RankedTensorTypeStorage *, RankedTensorTypeKeyInfo>;
-  RankedTensorTypeSet rankedTensors;
-
-  /// Unranked tensor type uniquing.
-  DenseMap<Type, UnrankedTensorTypeStorage *> unrankedTensors;
-
-  /// MemRef type uniquing.
-  using MemRefTypeSet = DenseSet<MemRefTypeStorage *, MemRefTypeKeyInfo>;
-  MemRefTypeSet memrefs;
-
-  // Attribute uniquing.
-  BoolAttributeStorage *boolAttrs[2] = {nullptr};
-  DenseSet<IntegerAttributeStorage *, IntegerAttrKeyInfo> integerAttrs;
-  DenseSet<FloatAttributeStorage *, FloatAttrKeyInfo> floatAttrs;
-  StringMap<StringAttributeStorage *> stringAttrs;
-  using ArrayAttrSet = DenseSet<ArrayAttributeStorage *, ArrayAttrKeyInfo>;
-  ArrayAttrSet arrayAttrs;
-  DenseMap<AffineMap, AffineMapAttributeStorage *> affineMapAttrs;
-  DenseMap<IntegerSet, IntegerSetAttributeStorage *> integerSetAttrs;
-  DenseMap<Type, TypeAttributeStorage *> typeAttrs;
-  using AttributeListSet =
-      DenseSet<AttributeListStorage *, AttributeListKeyInfo>;
-  AttributeListSet attributeLists;
-  DenseMap<const Function *, FunctionAttributeStorage *> functionAttrs;
-  DenseMap<std::pair<Type, Attribute>, SplatElementsAttributeStorage *>
-      splatElementsAttrs;
-  using DenseElementsAttrSet =
-      DenseSet<DenseElementsAttributeStorage *, DenseElementsAttrInfo>;
-  DenseElementsAttrSet denseElementsAttrs;
-  using OpaqueElementsAttrSet =
-      DenseSet<OpaqueElementsAttributeStorage *, OpaqueElementsAttrInfo>;
-  OpaqueElementsAttrSet opaqueElementsAttrs;
-  DenseMap<std::tuple<Type, Attribute, Attribute>,
-           SparseElementsAttributeStorage *>
-      sparseElementsAttrs;
+  /// A distinct attribute allocator that allocates every time since the
+  /// address of the distinct attribute storage serves as unique identifier. The
+  /// allocator is thread safe and frees the allocated storage after its
+  /// destruction.
+  DistinctAttributeAllocator distinctAttributeAllocator;
 
 public:
-  MLIRContextImpl() : filenames(locationAllocator), identifiers(allocator) {}
-
-  /// Copy the specified array of elements into memory managed by our bump
-  /// pointer allocator.  This assumes the elements are all PODs.
-  template <typename T> ArrayRef<T> copyInto(ArrayRef<T> elements) {
-    auto result = allocator.Allocate<T>(elements.size());
-    std::uninitialized_copy(elements.begin(), elements.end(), result);
-    return ArrayRef<T>(result, elements.size());
+  MLIRContextImpl(bool threadingIsEnabled)
+      : threadingIsEnabled(threadingIsEnabled) {
+    if (threadingIsEnabled) {
+      ownedThreadPool = std::make_unique<llvm::DefaultThreadPool>();
+      threadPool = ownedThreadPool.get();
+    }
+  }
+  ~MLIRContextImpl() {
+    for (auto typeMapping : registeredTypes)
+      typeMapping.second->~AbstractType();
+    for (auto attrMapping : registeredAttributes)
+      attrMapping.second->~AbstractAttribute();
   }
 };
-} // end namespace mlir
+} // namespace mlir
 
-MLIRContext::MLIRContext() : impl(new MLIRContextImpl()) {
-  new BuiltinDialect(this);
-  registerAllDialects(this);
+MLIRContext::MLIRContext(Threading setting)
+    : MLIRContext(DialectRegistry(), setting) {}
+
+MLIRContext::MLIRContext(const DialectRegistry &registry, Threading setting)
+    : impl(new MLIRContextImpl(setting == Threading::ENABLED &&
+                               !isThreadingGloballyDisabled())) {
+  // Initialize values based on the command line flags if they were provided.
+  if (clOptions.isConstructed()) {
+    printOpOnDiagnostic(clOptions->printOpOnDiagnostic);
+    printStackTraceOnDiagnostic(clOptions->printStackTraceOnDiagnostic);
+  }
+
+  // Pre-populate the registry.
+  registry.appendTo(impl->dialectsRegistry);
+
+  // Ensure the builtin dialect is always pre-loaded.
+  getOrLoadDialect<BuiltinDialect>();
+
+  // Initialize several common attributes and types to avoid the need to lock
+  // the context when accessing them.
+
+  //// Types.
+  /// Floating-point Types.
+  impl->bf16Ty = TypeUniquer::get<BFloat16Type>(this);
+  impl->f16Ty = TypeUniquer::get<Float16Type>(this);
+  impl->tf32Ty = TypeUniquer::get<FloatTF32Type>(this);
+  impl->f32Ty = TypeUniquer::get<Float32Type>(this);
+  impl->f64Ty = TypeUniquer::get<Float64Type>(this);
+  impl->f80Ty = TypeUniquer::get<Float80Type>(this);
+  impl->f128Ty = TypeUniquer::get<Float128Type>(this);
+  /// Index Type.
+  impl->indexTy = TypeUniquer::get<IndexType>(this);
+  /// Integer Types.
+  impl->int1Ty = TypeUniquer::get<IntegerType>(this, 1, IntegerType::Signless);
+  impl->int8Ty = TypeUniquer::get<IntegerType>(this, 8, IntegerType::Signless);
+  impl->int16Ty =
+      TypeUniquer::get<IntegerType>(this, 16, IntegerType::Signless);
+  impl->int32Ty =
+      TypeUniquer::get<IntegerType>(this, 32, IntegerType::Signless);
+  impl->int64Ty =
+      TypeUniquer::get<IntegerType>(this, 64, IntegerType::Signless);
+  impl->int128Ty =
+      TypeUniquer::get<IntegerType>(this, 128, IntegerType::Signless);
+  /// None Type.
+  impl->noneType = TypeUniquer::get<NoneType>(this);
+
+  //// Attributes.
+  //// Note: These must be registered after the types as they may generate one
+  //// of the above types internally.
+  /// Unknown Location Attribute.
+  impl->unknownLocAttr = AttributeUniquer::get<UnknownLoc>(this);
+  /// Bool Attributes.
+  impl->falseAttr = IntegerAttr::getBoolAttrUnchecked(impl->int1Ty, false);
+  impl->trueAttr = IntegerAttr::getBoolAttrUnchecked(impl->int1Ty, true);
+  /// Unit Attribute.
+  impl->unitAttr = AttributeUniquer::get<UnitAttr>(this);
+  /// The empty dictionary attribute.
+  impl->emptyDictionaryAttr = DictionaryAttr::getEmptyUnchecked(this);
+  /// The empty string attribute.
+  impl->emptyStringAttr = StringAttr::getEmptyStringAttrUnchecked(this);
+
+  // Register the affine storage objects with the uniquer.
+  impl->affineUniquer
+      .registerParametricStorageType<AffineBinaryOpExprStorage>();
+  impl->affineUniquer
+      .registerParametricStorageType<AffineConstantExprStorage>();
+  impl->affineUniquer.registerParametricStorageType<AffineDimExprStorage>();
+  impl->affineUniquer.registerParametricStorageType<AffineMapStorage>();
+  impl->affineUniquer.registerParametricStorageType<IntegerSetStorage>();
 }
 
-MLIRContext::~MLIRContext() {}
+MLIRContext::~MLIRContext() = default;
+
+/// Copy the specified array of elements into memory managed by the provided
+/// bump pointer allocator.  This assumes the elements are all PODs.
+template <typename T>
+static ArrayRef<T> copyArrayRefInto(llvm::BumpPtrAllocator &allocator,
+                                    ArrayRef<T> elements) {
+  auto result = allocator.Allocate<T>(elements.size());
+  llvm::uninitialized_copy(elements, result);
+  return ArrayRef<T>(result, elements.size());
+}
+
+//===----------------------------------------------------------------------===//
+// Action Handling
+//===----------------------------------------------------------------------===//
+
+void MLIRContext::registerActionHandler(HandlerTy handler) {
+  getImpl().actionHandler = std::move(handler);
+}
+
+/// Dispatch the provided action to the handler if any, or just execute it.
+void MLIRContext::executeActionInternal(function_ref<void()> actionFn,
+                                        const tracing::Action &action) {
+  assert(getImpl().actionHandler);
+  getImpl().actionHandler(actionFn, action);
+}
+
+bool MLIRContext::hasActionHandler() { return (bool)getImpl().actionHandler; }
 
 //===----------------------------------------------------------------------===//
 // Diagnostic Handlers
 //===----------------------------------------------------------------------===//
 
-/// Register an issue handler with this MLIR context.  The issue handler is
-/// passed location information along with a message and a DiagnosticKind enum
-/// value that indicates the type of the diagnostic (e.g., Warning, Error).
-void MLIRContext::registerDiagnosticHandler(
-    const DiagnosticHandlerTy &handler) {
-  getImpl().diagnosticHandler = handler;
-}
-
-/// Return the current diagnostic handler, or null if none is present.
-auto MLIRContext::getDiagnosticHandler() const -> DiagnosticHandlerTy {
-  return getImpl().diagnosticHandler;
-}
-
-/// This emits a diagnostic using the registered issue handle if present, or
-/// with the default behavior if not.  The MLIR compiler should not generally
-/// interact with this, it should use methods on Operation instead.
-void MLIRContext::emitDiagnostic(Location location, const llvm::Twine &message,
-                                 DiagnosticKind kind) const {
-  // Check to see if we are emitting a diagnostic on a fused location.
-  if (auto fusedLoc = location.dyn_cast<FusedLoc>()) {
-    auto fusedLocs = fusedLoc->getLocations();
-
-    // Emit the original diagnostic with the first location in the fused list.
-    emitDiagnostic(fusedLocs.front(), message, kind);
-
-    // Emit the rest of the locations as notes.
-    for (unsigned i = 1, e = fusedLocs.size(); i != e; ++i)
-      emitDiagnostic(fusedLocs[i], "fused from here", DiagnosticKind::Note);
-    return;
-  }
-
-  // If we had a handler registered, emit the diagnostic using it.
-  auto handler = getImpl().diagnosticHandler;
-  if (handler)
-    return handler(location, message.str(), kind);
-
-  // The default behavior for notes and warnings is to ignore them.
-  if (kind != DiagnosticKind::Error)
-    return;
-
-  auto &os = llvm::errs();
-
-  if (!location.isa<UnknownLoc>())
-    os << location << ": ";
-
-  os << "error: ";
-
-  // The default behavior for errors is to emit them to stderr.
-  os << message.str() << '\n';
-  os.flush();
-}
-
-void MLIRContext::emitError(Location location,
-                            const llvm::Twine &message) const {
-  emitDiagnostic(location, message, DiagnosticKind::Error);
-}
+/// Returns the diagnostic engine for this context.
+DiagnosticEngine &MLIRContext::getDiagEngine() { return getImpl().diagEngine; }
 
 //===----------------------------------------------------------------------===//
 // Dialect and Operation Registration
 //===----------------------------------------------------------------------===//
 
+void MLIRContext::appendDialectRegistry(const DialectRegistry &registry) {
+  if (registry.isSubsetOf(impl->dialectsRegistry))
+    return;
+
+  assert(impl->multiThreadedExecutionContext == 0 &&
+         "appending to the MLIRContext dialect registry while in a "
+         "multi-threaded execution context");
+  registry.appendTo(impl->dialectsRegistry);
+
+  // For the already loaded dialects, apply any possible extensions immediately.
+  registry.applyExtensions(this);
+}
+
+const DialectRegistry &MLIRContext::getDialectRegistry() {
+  return impl->dialectsRegistry;
+}
+
 /// Return information about all registered IR dialects.
-std::vector<Dialect *> MLIRContext::getRegisteredDialects() const {
+std::vector<Dialect *> MLIRContext::getLoadedDialects() {
   std::vector<Dialect *> result;
-  result.reserve(getImpl().dialects.size());
-  for (auto &dialect : getImpl().dialects)
-    result.push_back(dialect.get());
+  result.reserve(impl->loadedDialects.size());
+  for (auto &dialect : impl->loadedDialects)
+    result.push_back(dialect.second.get());
+  llvm::array_pod_sort(result.begin(), result.end(),
+                       [](Dialect *const *lhs, Dialect *const *rhs) -> int {
+                         return (*lhs)->getNamespace() < (*rhs)->getNamespace();
+                       });
+  return result;
+}
+std::vector<StringRef> MLIRContext::getAvailableDialects() {
+  std::vector<StringRef> result;
+  for (auto dialect : impl->dialectsRegistry.getDialectNames())
+    result.push_back(dialect);
   return result;
 }
 
-/// Get registered IR dialect which has the longest matching with the given
-/// prefix. If none is found, returns nullptr.
-Dialect *MLIRContext::getRegisteredDialect(StringRef prefix) const {
-  Dialect *result = nullptr;
-  for (auto &dialect : getImpl().dialects) {
-    if (prefix.startswith(dialect->getOperationPrefix()))
-      if (!result || result->getOperationPrefix().size() <
-                         dialect->getOperationPrefix().size())
-        result = dialect.get();
-  }
-  return result;
+/// Get a registered IR dialect with the given namespace. If none is found,
+/// then return nullptr.
+Dialect *MLIRContext::getLoadedDialect(StringRef name) {
+  // Dialects are sorted by name, so we can use binary search for lookup.
+  auto it = impl->loadedDialects.find(name);
+  return (it != impl->loadedDialects.end()) ? it->second.get() : nullptr;
 }
 
-/// Register this dialect object with the specified context.  The context
-/// takes ownership of the heap allocated dialect.
-void Dialect::registerDialect(MLIRContext *context) {
-  context->getImpl().dialects.push_back(std::unique_ptr<Dialect>(this));
+Dialect *MLIRContext::getOrLoadDialect(StringRef name) {
+  Dialect *dialect = getLoadedDialect(name);
+  if (dialect)
+    return dialect;
+  DialectAllocatorFunctionRef allocator =
+      impl->dialectsRegistry.getDialectAllocator(name);
+  return allocator ? allocator(this) : nullptr;
 }
 
-/// Return information about all registered operations.  This isn't very
-/// efficient, typically you should ask the operations about their properties
-/// directly.
-std::vector<AbstractOperation *> MLIRContext::getRegisteredOperations() const {
-  // We just have the operations in a non-deterministic hash table order.  Dump
-  // into a temporary array, then sort it by operation name to get a stable
-  // ordering.
-  StringMap<AbstractOperation> &registeredOps = getImpl().registeredOperations;
+/// Get a dialect for the provided namespace and TypeID: abort the program if a
+/// dialect exist for this namespace with different TypeID. Returns a pointer to
+/// the dialect owned by the context.
+Dialect *
+MLIRContext::getOrLoadDialect(StringRef dialectNamespace, TypeID dialectID,
+                              function_ref<std::unique_ptr<Dialect>()> ctor) {
+  auto &impl = getImpl();
+  // Get the correct insertion position sorted by namespace.
+  auto dialectIt = impl.loadedDialects.try_emplace(dialectNamespace, nullptr);
 
-  std::vector<std::pair<StringRef, AbstractOperation *>> opsToSort;
-  opsToSort.reserve(registeredOps.size());
-  for (auto &elt : registeredOps)
-    opsToSort.push_back({elt.first(), &elt.second});
+  if (dialectIt.second) {
+    LLVM_DEBUG(llvm::dbgs()
+               << "Load new dialect in Context " << dialectNamespace << "\n");
+#ifndef NDEBUG
+    if (impl.multiThreadedExecutionContext != 0)
+      llvm::report_fatal_error(
+          "Loading a dialect (" + dialectNamespace +
+          ") while in a multi-threaded execution context (maybe "
+          "the PassManager): this can indicate a "
+          "missing `dependentDialects` in a pass for example.");
+#endif // NDEBUG
+    // loadedDialects entry is initialized to nullptr, indicating that the
+    // dialect is currently being loaded. Re-lookup the address in
+    // loadedDialects because the table might have been rehashed by recursive
+    // dialect loading in ctor().
+    std::unique_ptr<Dialect> &dialectOwned =
+        impl.loadedDialects[dialectNamespace] = ctor();
+    Dialect *dialect = dialectOwned.get();
+    assert(dialect && "dialect ctor failed");
 
-  llvm::array_pod_sort(opsToSort.begin(), opsToSort.end());
-
-  std::vector<AbstractOperation *> result;
-  result.reserve(opsToSort.size());
-  for (auto &elt : opsToSort)
-    result.push_back(elt.second);
-  return result;
-}
-
-void Dialect::addOperation(AbstractOperation opInfo) {
-  assert(opInfo.name.startswith(opPrefix) &&
-         "op name doesn't start with prefix");
-  assert(&opInfo.dialect == this && "Dialect object mismatch");
-
-  auto &impl = context->getImpl();
-  if (!impl.registeredOperations.insert({opInfo.name, opInfo}).second) {
-    llvm::errs() << "error: ops named '" << opInfo.name
-                 << "' is already registered.\n";
-    abort();
-  }
-}
-
-/// Look up the specified operation in the operation set and return a pointer
-/// to it if present.  Otherwise, return a null pointer.
-const AbstractOperation *AbstractOperation::lookup(StringRef opName,
-                                                   MLIRContext *context) {
-  auto &impl = context->getImpl();
-  auto it = impl.registeredOperations.find(opName);
-  if (it != impl.registeredOperations.end())
-    return &it->second;
-  return nullptr;
-}
-
-//===----------------------------------------------------------------------===//
-// Identifier uniquing
-//===----------------------------------------------------------------------===//
-
-/// Return an identifier for the specified string.
-Identifier Identifier::get(StringRef str, const MLIRContext *context) {
-  assert(!str.empty() && "Cannot create an empty identifier");
-  assert(str.find('\0') == StringRef::npos &&
-         "Cannot create an identifier with a nul character");
-
-  auto &impl = context->getImpl();
-  auto it = impl.identifiers.insert({str, char()}).first;
-  return Identifier(it->getKeyData());
-}
-
-//===----------------------------------------------------------------------===//
-// Location uniquing
-//===----------------------------------------------------------------------===//
-
-UnknownLoc UnknownLoc::get(MLIRContext *context) {
-  auto &impl = context->getImpl();
-  if (auto *result = impl.theUnknownLoc)
-    return result;
-
-  impl.theUnknownLoc = impl.allocator.Allocate<UnknownLocationStorage>();
-  new (impl.theUnknownLoc) UnknownLocationStorage{Location::Kind::Unknown};
-  return impl.theUnknownLoc;
-}
-
-UniquedFilename UniquedFilename::get(StringRef filename, MLIRContext *context) {
-  auto &impl = context->getImpl();
-  auto it = impl.filenames.insert({filename, char()}).first;
-  return UniquedFilename(it->getKeyData());
-}
-
-FileLineColLoc FileLineColLoc::get(UniquedFilename filename, unsigned line,
-                                   unsigned column, MLIRContext *context) {
-  auto &impl = context->getImpl();
-  auto &entry =
-      impl.fileLineColLocs[std::make_tuple(filename.data(), line, column)];
-  if (!entry) {
-    entry = impl.allocator.Allocate<FileLineColLocationStorage>();
-    new (entry) FileLineColLocationStorage{
-        {Location::Kind::FileLineCol}, filename, line, column};
-  }
-
-  return entry;
-}
-
-Location FusedLoc::get(ArrayRef<Location> locs, MLIRContext *context) {
-  return get(locs, Attribute(), context);
-}
-
-Location FusedLoc::get(ArrayRef<Location> locs, Attribute metadata,
-                       MLIRContext *context) {
-  // Unique the set of locations to be fused.
-  SmallSetVector<Location, 4> decomposedLocs;
-  for (auto loc : locs) {
-    // If the location is a fused location we decompose it if it has no
-    // metadata or the metadata is the same as the top level metadata.
-    if (auto fusedLoc = loc.dyn_cast<FusedLoc>()) {
-      if (fusedLoc->getMetadata() == metadata) {
-        // UnknownLoc's have already been removed from FusedLocs so we can
-        // simply add all of the internal locations.
-        decomposedLocs.insert(fusedLoc->getLocations().begin(),
-                              fusedLoc->getLocations().end());
-        continue;
-      }
+    // Refresh all the identifiers dialect field, this catches cases where a
+    // dialect may be loaded after identifier prefixed with this dialect name
+    // were already created.
+    auto stringAttrsIt = impl.dialectReferencingStrAttrs.find(dialectNamespace);
+    if (stringAttrsIt != impl.dialectReferencingStrAttrs.end()) {
+      for (StringAttrStorage *storage : stringAttrsIt->second)
+        storage->referencedDialect = dialect;
+      impl.dialectReferencingStrAttrs.erase(stringAttrsIt);
     }
-    // Otherwise, only add known locations to the set.
-    if (!loc.isa<UnknownLoc>())
-      decomposedLocs.insert(loc);
+
+    // Apply any extensions to this newly loaded dialect.
+    impl.dialectsRegistry.applyExtensions(dialect);
+    return dialect;
   }
-  locs = decomposedLocs.getArrayRef();
 
-  // Handle the simple cases of less than two locations.
-  if (locs.empty())
-    return UnknownLoc::get(context);
-  if (locs.size() == 1)
-    return locs.front();
+#ifndef NDEBUG
+  if (dialectIt.first->second == nullptr)
+    llvm::report_fatal_error(
+        "Loading (and getting) a dialect (" + dialectNamespace +
+        ") while the same dialect is still loading: use loadDialect instead "
+        "of getOrLoadDialect.");
+#endif // NDEBUG
 
+  // Abort if dialect with namespace has already been registered.
+  std::unique_ptr<Dialect> &dialect = dialectIt.first->second;
+  if (dialect->getTypeID() != dialectID)
+    llvm::report_fatal_error("a dialect with namespace '" + dialectNamespace +
+                             "' has already been registered");
+
+  return dialect.get();
+}
+
+bool MLIRContext::isDialectLoading(StringRef dialectNamespace) {
+  auto it = getImpl().loadedDialects.find(dialectNamespace);
+  // nullptr indicates that the dialect is currently being loaded.
+  return it != getImpl().loadedDialects.end() && it->second == nullptr;
+}
+
+DynamicDialect *MLIRContext::getOrLoadDynamicDialect(
+    StringRef dialectNamespace, function_ref<void(DynamicDialect *)> ctor) {
+  auto &impl = getImpl();
+  // Get the correct insertion position sorted by namespace.
+  auto dialectIt = impl.loadedDialects.find(dialectNamespace);
+
+  if (dialectIt != impl.loadedDialects.end()) {
+    if (auto *dynDialect = dyn_cast<DynamicDialect>(dialectIt->second.get()))
+      return dynDialect;
+    llvm::report_fatal_error("a dialect with namespace '" + dialectNamespace +
+                             "' has already been registered");
+  }
+
+  LLVM_DEBUG(llvm::dbgs() << "Load new dynamic dialect in Context "
+                          << dialectNamespace << "\n");
+#ifndef NDEBUG
+  if (impl.multiThreadedExecutionContext != 0)
+    llvm::report_fatal_error(
+        "Loading a dynamic dialect (" + dialectNamespace +
+        ") while in a multi-threaded execution context (maybe "
+        "the PassManager): this can indicate a "
+        "missing `dependentDialects` in a pass for example.");
+#endif
+
+  auto name = StringAttr::get(this, dialectNamespace);
+  auto *dialect = new DynamicDialect(name, this);
+  (void)getOrLoadDialect(name, dialect->getTypeID(), [dialect, ctor]() {
+    ctor(dialect);
+    return std::unique_ptr<DynamicDialect>(dialect);
+  });
+  // This is the same result as `getOrLoadDialect` (if it didn't failed),
+  // since it has the same TypeID, and TypeIDs are unique.
+  return dialect;
+}
+
+void MLIRContext::loadAllAvailableDialects() {
+  for (StringRef name : getAvailableDialects())
+    getOrLoadDialect(name);
+}
+
+llvm::hash_code MLIRContext::getRegistryHash() {
+  llvm::hash_code hash(0);
+  // Factor in number of loaded dialects, attributes, operations, types.
+  hash = llvm::hash_combine(hash, impl->loadedDialects.size());
+  hash = llvm::hash_combine(hash, impl->registeredAttributes.size());
+  hash = llvm::hash_combine(hash, impl->registeredOperations.size());
+  hash = llvm::hash_combine(hash, impl->registeredTypes.size());
+  return hash;
+}
+
+bool MLIRContext::allowsUnregisteredDialects() {
+  return impl->allowUnregisteredDialects;
+}
+
+void MLIRContext::allowUnregisteredDialects(bool allowing) {
+  assert(impl->multiThreadedExecutionContext == 0 &&
+         "changing MLIRContext `allow-unregistered-dialects` configuration "
+         "while in a multi-threaded execution context");
+  impl->allowUnregisteredDialects = allowing;
+}
+
+/// Return true if multi-threading is enabled by the context.
+bool MLIRContext::isMultithreadingEnabled() {
+  return impl->threadingIsEnabled && llvm::llvm_is_multithreaded();
+}
+
+/// Set the flag specifying if multi-threading is disabled by the context.
+void MLIRContext::disableMultithreading(bool disable) {
+  // This API can be overridden by the global debugging flag
+  // --mlir-disable-threading
+  if (isThreadingGloballyDisabled())
+    return;
+  assert(impl->multiThreadedExecutionContext == 0 &&
+         "changing MLIRContext `disable-threading` configuration while "
+         "in a multi-threaded execution context");
+
+  impl->threadingIsEnabled = !disable;
+
+  // Update the threading mode for each of the uniquers.
+  impl->affineUniquer.disableMultithreading(disable);
+  impl->attributeUniquer.disableMultithreading(disable);
+  impl->typeUniquer.disableMultithreading(disable);
+
+  // Destroy thread pool (stop all threads) if it is no longer needed, or create
+  // a new one if multithreading was re-enabled.
+  if (disable) {
+    // If the thread pool is owned, explicitly set it to nullptr to avoid
+    // keeping a dangling pointer around. If the thread pool is externally
+    // owned, we don't do anything.
+    if (impl->ownedThreadPool) {
+      assert(impl->threadPool);
+      impl->threadPool = nullptr;
+      impl->ownedThreadPool.reset();
+    }
+  } else if (!impl->threadPool) {
+    // The thread pool isn't externally provided.
+    assert(!impl->ownedThreadPool);
+    impl->ownedThreadPool = std::make_unique<llvm::DefaultThreadPool>();
+    impl->threadPool = impl->ownedThreadPool.get();
+  }
+}
+
+void MLIRContext::setThreadPool(llvm::ThreadPoolInterface &pool) {
+  assert(!isMultithreadingEnabled() &&
+         "expected multi-threading to be disabled when setting a ThreadPool");
+  impl->threadPool = &pool;
+  impl->ownedThreadPool.reset();
+  enableMultithreading();
+}
+
+unsigned MLIRContext::getNumThreads() {
+  if (isMultithreadingEnabled()) {
+    assert(impl->threadPool &&
+           "multi-threading is enabled but threadpool not set");
+    return impl->threadPool->getMaxConcurrency();
+  }
+  // No multithreading or active thread pool. Return 1 thread.
+  return 1;
+}
+
+llvm::ThreadPoolInterface &MLIRContext::getThreadPool() {
+  assert(isMultithreadingEnabled() &&
+         "expected multi-threading to be enabled within the context");
+  assert(impl->threadPool &&
+         "multi-threading is enabled but threadpool not set");
+  return *impl->threadPool;
+}
+
+void MLIRContext::enterMultiThreadedExecution() {
+#ifndef NDEBUG
+  ++impl->multiThreadedExecutionContext;
+#endif
+}
+void MLIRContext::exitMultiThreadedExecution() {
+#ifndef NDEBUG
+  --impl->multiThreadedExecutionContext;
+#endif
+}
+
+/// Return true if we should attach the operation to diagnostics emitted via
+/// Operation::emit.
+bool MLIRContext::shouldPrintOpOnDiagnostic() {
+  return impl->printOpOnDiagnostic;
+}
+
+/// Set the flag specifying if we should attach the operation to diagnostics
+/// emitted via Operation::emit.
+void MLIRContext::printOpOnDiagnostic(bool enable) {
+  assert(impl->multiThreadedExecutionContext == 0 &&
+         "changing MLIRContext `print-op-on-diagnostic` configuration while in "
+         "a multi-threaded execution context");
+  impl->printOpOnDiagnostic = enable;
+}
+
+/// Return true if we should attach the current stacktrace to diagnostics when
+/// emitted.
+bool MLIRContext::shouldPrintStackTraceOnDiagnostic() {
+  return impl->printStackTraceOnDiagnostic;
+}
+
+/// Set the flag specifying if we should attach the current stacktrace when
+/// emitting diagnostics.
+void MLIRContext::printStackTraceOnDiagnostic(bool enable) {
+  assert(impl->multiThreadedExecutionContext == 0 &&
+         "changing MLIRContext `print-stacktrace-on-diagnostic` configuration "
+         "while in a multi-threaded execution context");
+  impl->printStackTraceOnDiagnostic = enable;
+}
+
+/// Return information about all registered operations.
+ArrayRef<RegisteredOperationName> MLIRContext::getRegisteredOperations() {
+  return impl->sortedRegisteredOperations;
+}
+
+/// Return information for registered operations by dialect.
+ArrayRef<RegisteredOperationName>
+MLIRContext::getRegisteredOperationsByDialect(StringRef dialectName) {
+  auto lowerBound = llvm::lower_bound(
+      impl->sortedRegisteredOperations, dialectName, [](auto &lhs, auto &rhs) {
+        return lhs.getDialect().getNamespace().compare(rhs);
+      });
+
+  if (lowerBound == impl->sortedRegisteredOperations.end() ||
+      lowerBound->getDialect().getNamespace() != dialectName)
+    return ArrayRef<RegisteredOperationName>();
+
+  auto upperBound =
+      std::upper_bound(lowerBound, impl->sortedRegisteredOperations.end(),
+                       dialectName, [](auto &lhs, auto &rhs) {
+                         return lhs.compare(rhs.getDialect().getNamespace());
+                       });
+
+  size_t count = std::distance(lowerBound, upperBound);
+  return ArrayRef(&*lowerBound, count);
+}
+
+bool MLIRContext::isOperationRegistered(StringRef name) {
+  return RegisteredOperationName::lookup(name, this).has_value();
+}
+
+void Dialect::addType(TypeID typeID, AbstractType &&typeInfo) {
   auto &impl = context->getImpl();
+  assert(impl.multiThreadedExecutionContext == 0 &&
+         "Registering a new type kind while in a multi-threaded execution "
+         "context");
+  auto *newInfo =
+      new (impl.abstractDialectSymbolAllocator.Allocate<AbstractType>())
+          AbstractType(std::move(typeInfo));
+  if (!impl.registeredTypes.insert({typeID, newInfo}).second)
+    llvm::report_fatal_error("Dialect Type already registered.");
+  if (!impl.nameToType.insert({newInfo->getName(), newInfo}).second)
+    llvm::report_fatal_error("Dialect Type with name " + newInfo->getName() +
+                             " is already registered.");
+}
 
-  // Look to see if the fused location has been created already.
-  auto existing =
-      impl.fusedLocs.insert_as(nullptr, std::make_pair(locs, metadata));
+void Dialect::addAttribute(TypeID typeID, AbstractAttribute &&attrInfo) {
+  auto &impl = context->getImpl();
+  assert(impl.multiThreadedExecutionContext == 0 &&
+         "Registering a new attribute kind while in a multi-threaded execution "
+         "context");
+  auto *newInfo =
+      new (impl.abstractDialectSymbolAllocator.Allocate<AbstractAttribute>())
+          AbstractAttribute(std::move(attrInfo));
+  if (!impl.registeredAttributes.insert({typeID, newInfo}).second)
+    llvm::report_fatal_error("Dialect Attribute already registered.");
+  if (!impl.nameToAttribute.insert({newInfo->getName(), newInfo}).second)
+    llvm::report_fatal_error("Dialect Attribute with name " +
+                             newInfo->getName() + " is already registered.");
+}
 
-  // If it has been created, return it.
-  if (!existing.second)
-    return *existing.first;
+//===----------------------------------------------------------------------===//
+// AbstractAttribute
+//===----------------------------------------------------------------------===//
 
-  auto byteSize = FusedLocationStorage::totalSizeToAlloc<Location>(locs.size());
-  auto rawMem =
-      impl.allocator.Allocate(byteSize, alignof(FusedLocationStorage));
-  auto result =
-      new (rawMem) FusedLocationStorage{{Location::Kind::FusedLocation},
-                                        {},
-                                        static_cast<unsigned>(locs.size()),
-                                        metadata};
+/// Get the dialect that registered the attribute with the provided typeid.
+const AbstractAttribute &AbstractAttribute::lookup(TypeID typeID,
+                                                   MLIRContext *context) {
+  const AbstractAttribute *abstract = lookupMutable(typeID, context);
+  if (!abstract)
+    llvm::report_fatal_error("Trying to create an Attribute that was not "
+                             "registered in this MLIRContext.");
+  return *abstract;
+}
 
-  std::uninitialized_copy(locs.begin(), locs.end(),
-                          result->getTrailingObjects<Location>());
-  return *existing.first = result;
+AbstractAttribute *AbstractAttribute::lookupMutable(TypeID typeID,
+                                                    MLIRContext *context) {
+  auto &impl = context->getImpl();
+  return impl.registeredAttributes.lookup(typeID);
+}
+
+std::optional<std::reference_wrapper<const AbstractAttribute>>
+AbstractAttribute::lookup(StringRef name, MLIRContext *context) {
+  MLIRContextImpl &impl = context->getImpl();
+  const AbstractAttribute *type = impl.nameToAttribute.lookup(name);
+
+  if (!type)
+    return std::nullopt;
+  return {*type};
+}
+
+//===----------------------------------------------------------------------===//
+// OperationName
+//===----------------------------------------------------------------------===//
+
+OperationName::Impl::Impl(StringRef name, Dialect *dialect, TypeID typeID,
+                          detail::InterfaceMap interfaceMap)
+    : Impl(StringAttr::get(dialect->getContext(), name), dialect, typeID,
+           std::move(interfaceMap)) {}
+
+OperationName::OperationName(StringRef name, MLIRContext *context) {
+  MLIRContextImpl &ctxImpl = context->getImpl();
+
+  // Check for an existing name in read-only mode.
+  bool isMultithreadingEnabled = context->isMultithreadingEnabled();
+  if (isMultithreadingEnabled) {
+    // Check the registered info map first. In the overwhelmingly common case,
+    // the entry will be in here and it also removes the need to acquire any
+    // locks.
+    auto registeredIt = ctxImpl.registeredOperationsByName.find(name);
+    if (LLVM_LIKELY(registeredIt != ctxImpl.registeredOperationsByName.end())) {
+      impl = registeredIt->second.impl;
+      return;
+    }
+
+    llvm::sys::SmartScopedReader<true> contextLock(ctxImpl.operationInfoMutex);
+    auto it = ctxImpl.operations.find(name);
+    if (it != ctxImpl.operations.end()) {
+      impl = it->second.get();
+      return;
+    }
+  }
+
+  // Acquire a writer-lock so that we can safely create the new instance.
+  ScopedWriterLock lock(ctxImpl.operationInfoMutex, isMultithreadingEnabled);
+
+  auto it = ctxImpl.operations.try_emplace(name);
+  if (it.second) {
+    auto nameAttr = StringAttr::get(context, name);
+    it.first->second = std::make_unique<UnregisteredOpModel>(
+        nameAttr, nameAttr.getReferencedDialect(), TypeID::get<void>(),
+        detail::InterfaceMap());
+  }
+  impl = it.first->second.get();
+}
+
+StringRef OperationName::getDialectNamespace() const {
+  if (Dialect *dialect = getDialect())
+    return dialect->getNamespace();
+  return getStringRef().split('.').first;
+}
+
+LogicalResult
+OperationName::UnregisteredOpModel::foldHook(Operation *, ArrayRef<Attribute>,
+                                             SmallVectorImpl<OpFoldResult> &) {
+  return failure();
+}
+void OperationName::UnregisteredOpModel::getCanonicalizationPatterns(
+    RewritePatternSet &, MLIRContext *) {}
+bool OperationName::UnregisteredOpModel::hasTrait(TypeID) { return false; }
+
+OperationName::ParseAssemblyFn
+OperationName::UnregisteredOpModel::getParseAssemblyFn() {
+  llvm::report_fatal_error("getParseAssemblyFn hook called on unregistered op");
+}
+void OperationName::UnregisteredOpModel::populateDefaultAttrs(
+    const OperationName &, NamedAttrList &) {}
+void OperationName::UnregisteredOpModel::printAssembly(
+    Operation *op, OpAsmPrinter &p, StringRef defaultDialect) {
+  p.printGenericOp(op);
+}
+LogicalResult
+OperationName::UnregisteredOpModel::verifyInvariants(Operation *) {
+  return success();
+}
+LogicalResult
+OperationName::UnregisteredOpModel::verifyRegionInvariants(Operation *) {
+  return success();
+}
+
+std::optional<Attribute>
+OperationName::UnregisteredOpModel::getInherentAttr(Operation *op,
+                                                    StringRef name) {
+  auto dict = dyn_cast_or_null<DictionaryAttr>(getPropertiesAsAttr(op));
+  if (!dict)
+    return std::nullopt;
+  if (Attribute attr = dict.get(name))
+    return attr;
+  return std::nullopt;
+}
+void OperationName::UnregisteredOpModel::setInherentAttr(Operation *op,
+                                                         StringAttr name,
+                                                         Attribute value) {
+  auto dict = dyn_cast_or_null<DictionaryAttr>(getPropertiesAsAttr(op));
+  assert(dict);
+  NamedAttrList attrs(dict);
+  attrs.set(name, value);
+  *op->getPropertiesStorage().as<Attribute *>() =
+      attrs.getDictionary(op->getContext());
+}
+void OperationName::UnregisteredOpModel::populateInherentAttrs(
+    Operation *op, NamedAttrList &attrs) {}
+LogicalResult OperationName::UnregisteredOpModel::verifyInherentAttrs(
+    OperationName opName, NamedAttrList &attributes,
+    function_ref<InFlightDiagnostic()> emitError) {
+  return success();
+}
+int OperationName::UnregisteredOpModel::getOpPropertyByteSize() {
+  return sizeof(Attribute);
+}
+void OperationName::UnregisteredOpModel::initProperties(
+    OperationName opName, OpaqueProperties storage, OpaqueProperties init) {
+  new (storage.as<Attribute *>()) Attribute();
+  if (init)
+    *storage.as<Attribute *>() = *init.as<Attribute *>();
+}
+void OperationName::UnregisteredOpModel::deleteProperties(
+    OpaqueProperties prop) {
+  prop.as<Attribute *>()->~Attribute();
+}
+void OperationName::UnregisteredOpModel::populateDefaultProperties(
+    OperationName opName, OpaqueProperties properties) {}
+LogicalResult OperationName::UnregisteredOpModel::setPropertiesFromAttr(
+    OperationName opName, OpaqueProperties properties, Attribute attr,
+    function_ref<InFlightDiagnostic()> emitError) {
+  *properties.as<Attribute *>() = attr;
+  return success();
+}
+Attribute
+OperationName::UnregisteredOpModel::getPropertiesAsAttr(Operation *op) {
+  return *op->getPropertiesStorage().as<Attribute *>();
+}
+void OperationName::UnregisteredOpModel::copyProperties(OpaqueProperties lhs,
+                                                        OpaqueProperties rhs) {
+  *lhs.as<Attribute *>() = *rhs.as<Attribute *>();
+}
+bool OperationName::UnregisteredOpModel::compareProperties(
+    OpaqueProperties lhs, OpaqueProperties rhs) {
+  return *lhs.as<Attribute *>() == *rhs.as<Attribute *>();
+}
+llvm::hash_code
+OperationName::UnregisteredOpModel::hashProperties(OpaqueProperties prop) {
+  return llvm::hash_combine(*prop.as<Attribute *>());
+}
+
+//===----------------------------------------------------------------------===//
+// RegisteredOperationName
+//===----------------------------------------------------------------------===//
+
+std::optional<RegisteredOperationName>
+RegisteredOperationName::lookup(TypeID typeID, MLIRContext *ctx) {
+  auto &impl = ctx->getImpl();
+  auto it = impl.registeredOperations.find(typeID);
+  if (it != impl.registeredOperations.end())
+    return it->second;
+  return std::nullopt;
+}
+
+std::optional<RegisteredOperationName>
+RegisteredOperationName::lookup(StringRef name, MLIRContext *ctx) {
+  auto &impl = ctx->getImpl();
+  auto it = impl.registeredOperationsByName.find(name);
+  if (it != impl.registeredOperationsByName.end())
+    return it->getValue();
+  return std::nullopt;
+}
+
+void RegisteredOperationName::insert(
+    std::unique_ptr<RegisteredOperationName::Impl> ownedImpl,
+    ArrayRef<StringRef> attrNames) {
+  RegisteredOperationName::Impl *impl = ownedImpl.get();
+  MLIRContext *ctx = impl->getDialect()->getContext();
+  auto &ctxImpl = ctx->getImpl();
+  assert(ctxImpl.multiThreadedExecutionContext == 0 &&
+         "registering a new operation kind while in a multi-threaded execution "
+         "context");
+
+  // Register the attribute names of this operation.
+  MutableArrayRef<StringAttr> cachedAttrNames;
+  if (!attrNames.empty()) {
+    cachedAttrNames = MutableArrayRef<StringAttr>(
+        ctxImpl.abstractDialectSymbolAllocator.Allocate<StringAttr>(
+            attrNames.size()),
+        attrNames.size());
+    for (unsigned i : llvm::seq<unsigned>(0, attrNames.size()))
+      new (&cachedAttrNames[i]) StringAttr(StringAttr::get(ctx, attrNames[i]));
+    impl->attributeNames = cachedAttrNames;
+  }
+  StringRef name = impl->getName().strref();
+  // Insert the operation info if it doesn't exist yet.
+  ctxImpl.operations[name] = std::move(ownedImpl);
+
+  // Update the registered info for this operation.
+  auto emplaced = ctxImpl.registeredOperations.try_emplace(
+      impl->getTypeID(), RegisteredOperationName(impl));
+  assert(emplaced.second && "operation name registration must be successful");
+  auto emplacedByName = ctxImpl.registeredOperationsByName.try_emplace(
+      name, RegisteredOperationName(impl));
+  (void)emplacedByName;
+  assert(emplacedByName.second &&
+         "operation name registration must be successful");
+
+  // Add emplaced operation name to the sorted operations container.
+  RegisteredOperationName &value = emplaced.first->second;
+  ctxImpl.sortedRegisteredOperations.insert(
+      llvm::upper_bound(ctxImpl.sortedRegisteredOperations, value,
+                        [](auto &lhs, auto &rhs) {
+                          return lhs.getIdentifier().compare(
+                              rhs.getIdentifier());
+                        }),
+      value);
+}
+
+//===----------------------------------------------------------------------===//
+// AbstractType
+//===----------------------------------------------------------------------===//
+
+const AbstractType &AbstractType::lookup(TypeID typeID, MLIRContext *context) {
+  const AbstractType *type = lookupMutable(typeID, context);
+  if (!type)
+    llvm::report_fatal_error(
+        "Trying to create a Type that was not registered in this MLIRContext.");
+  return *type;
+}
+
+AbstractType *AbstractType::lookupMutable(TypeID typeID, MLIRContext *context) {
+  auto &impl = context->getImpl();
+  return impl.registeredTypes.lookup(typeID);
+}
+
+std::optional<std::reference_wrapper<const AbstractType>>
+AbstractType::lookup(StringRef name, MLIRContext *context) {
+  MLIRContextImpl &impl = context->getImpl();
+  const AbstractType *type = impl.nameToType.lookup(name);
+
+  if (!type)
+    return std::nullopt;
+  return {*type};
 }
 
 //===----------------------------------------------------------------------===//
 // Type uniquing
 //===----------------------------------------------------------------------===//
 
+/// Returns the storage uniquer used for constructing type storage instances.
+/// This should not be used directly.
+StorageUniquer &MLIRContext::getTypeUniquer() { return getImpl().typeUniquer; }
+
+BFloat16Type BFloat16Type::get(MLIRContext *context) {
+  return context->getImpl().bf16Ty;
+}
+Float16Type Float16Type::get(MLIRContext *context) {
+  return context->getImpl().f16Ty;
+}
+FloatTF32Type FloatTF32Type::get(MLIRContext *context) {
+  return context->getImpl().tf32Ty;
+}
+Float32Type Float32Type::get(MLIRContext *context) {
+  return context->getImpl().f32Ty;
+}
+Float64Type Float64Type::get(MLIRContext *context) {
+  return context->getImpl().f64Ty;
+}
+Float80Type Float80Type::get(MLIRContext *context) {
+  return context->getImpl().f80Ty;
+}
+Float128Type Float128Type::get(MLIRContext *context) {
+  return context->getImpl().f128Ty;
+}
+
+/// Get an instance of the IndexType.
 IndexType IndexType::get(MLIRContext *context) {
-  auto &impl = context->getImpl();
-
-  if (impl.indexType)
-    return impl.indexType;
-
-  impl.indexType = impl.allocator.Allocate<IndexTypeStorage>();
-  new (impl.indexType) IndexTypeStorage{{Kind::Index, context}};
-  return impl.indexType;
+  return context->getImpl().indexTy;
 }
 
-static IntegerType getIntegerType(unsigned width, MLIRContext *context,
-                                  llvm::Optional<Location> location) {
-  if (width > IntegerType::kMaxWidth) {
-    if (location)
-      context->emitError(*location, "integer bitwidth is limited to " +
-                                        Twine(IntegerType::kMaxWidth) +
-                                        " bits");
-    return {};
+/// Return an existing integer type instance if one is cached within the
+/// context.
+static IntegerType
+getCachedIntegerType(unsigned width,
+                     IntegerType::SignednessSemantics signedness,
+                     MLIRContext *context) {
+  if (signedness != IntegerType::Signless)
+    return IntegerType();
+
+  switch (width) {
+  case 1:
+    return context->getImpl().int1Ty;
+  case 8:
+    return context->getImpl().int8Ty;
+  case 16:
+    return context->getImpl().int16Ty;
+  case 32:
+    return context->getImpl().int32Ty;
+  case 64:
+    return context->getImpl().int64Ty;
+  case 128:
+    return context->getImpl().int128Ty;
+  default:
+    return IntegerType();
   }
-
-  auto &impl = context->getImpl();
-
-  auto *&result = impl.integers[width];
-  if (!result) {
-    result = impl.allocator.Allocate<IntegerTypeStorage>();
-    new (result) IntegerTypeStorage{{Type::Kind::Integer, context}, width};
-  }
-
-  return result;
 }
 
-IntegerType IntegerType::getChecked(unsigned width, MLIRContext *context,
-                                    Location location) {
-  return getIntegerType(width, context, location);
+IntegerType IntegerType::get(MLIRContext *context, unsigned width,
+                             IntegerType::SignednessSemantics signedness) {
+  if (auto cached = getCachedIntegerType(width, signedness, context))
+    return cached;
+  return Base::get(context, width, signedness);
 }
 
-IntegerType IntegerType::get(unsigned width, MLIRContext *context) {
-  auto type = getIntegerType(width, context, None);
-  assert(type && "failed to construct IntegerType");
-  return type;
+IntegerType
+IntegerType::getChecked(function_ref<InFlightDiagnostic()> emitError,
+                        MLIRContext *context, unsigned width,
+                        SignednessSemantics signedness) {
+  if (auto cached = getCachedIntegerType(width, signedness, context))
+    return cached;
+  return Base::getChecked(emitError, context, width, signedness);
 }
 
-FloatType FloatType::get(Kind kind, MLIRContext *context) {
-  assert(kind >= Kind::FIRST_FLOATING_POINT_TYPE &&
-         kind <= Kind::LAST_FLOATING_POINT_TYPE && "Not an FP type kind");
-  auto &impl = context->getImpl();
-
-  // We normally have these types.
-  auto *&entry =
-      impl.floatTypes[(int)kind - int(Kind::FIRST_FLOATING_POINT_TYPE)];
-  if (entry)
-    return entry;
-
-  // On the first use, we allocate them into the bump pointer.
-  auto *ptr = impl.allocator.Allocate<FloatTypeStorage>();
-
-  // Initialize the memory using placement new.
-  new (ptr) FloatTypeStorage{{kind, context}};
-
-  // Cache and return it.
-  return entry = ptr;
-}
-
-OtherType OtherType::get(Kind kind, MLIRContext *context) {
-  assert(kind >= Kind::FIRST_OTHER_TYPE && kind <= Kind::LAST_OTHER_TYPE &&
-         "Not an 'other' type kind");
-  auto &impl = context->getImpl();
-
-  // We normally have these types.
-  auto *&entry = impl.otherTypes[(int)kind - int(Kind::FIRST_OTHER_TYPE)];
-  if (entry)
-    return entry;
-
-  // On the first use, we allocate them into the bump pointer.
-  auto *ptr = impl.allocator.Allocate<OtherTypeStorage>();
-
-  // Initialize the memory using placement new.
-  new (ptr) OtherTypeStorage{{kind, context}};
-
-  // Cache and return it.
-  return entry = ptr;
-}
-
-FunctionType FunctionType::get(ArrayRef<Type> inputs, ArrayRef<Type> results,
-                               MLIRContext *context) {
-  auto &impl = context->getImpl();
-
-  // Look to see if we already have this function type.
-  FunctionTypeKeyInfo::KeyTy key(inputs, results);
-  auto existing = impl.functions.insert_as(nullptr, key);
-
-  // If we already have it, return that value.
-  if (!existing.second)
-    return *existing.first;
-
-  // On the first use, we allocate them into the bump pointer.
-  auto *result = impl.allocator.Allocate<FunctionTypeStorage>();
-
-  // Copy the inputs and results into the bump pointer.
-  SmallVector<Type, 16> types;
-  types.reserve(inputs.size() + results.size());
-  types.append(inputs.begin(), inputs.end());
-  types.append(results.begin(), results.end());
-  auto typesList = impl.copyInto(ArrayRef<Type>(types));
-
-  // Initialize the memory using placement new.
-  new (result) FunctionTypeStorage{
-      {Kind::Function, context, static_cast<unsigned int>(inputs.size())},
-      static_cast<unsigned int>(results.size()),
-      typesList.data()};
-
-  // Cache and return it.
-  return *existing.first = result;
-}
-
-/// Get or create a new VectorType defined by the arguments.  If the resulting
-/// type would be ill-formed, return nullptr.  If the location is provided,
-/// i.e. is not nullptr, emit detailed error messages.  To emit errors when
-/// the location is unknown, pass in an instance of UnknownLoc.
-static VectorType getVectorType(ArrayRef<int> shape, Type elementType,
-                                Optional<Location> location) {
-  auto *context = elementType.getContext();
-
-  if (shape.empty()) {
-    if (location)
-      context->emitError(*location,
-                         "vector types must have at least one dimension");
-    return {};
-  }
-
-  if (!VectorType::isValidElementType(elementType)) {
-    if (location)
-      context->emitError(*location, "vector elements must be primitives");
-    return {};
-  }
-
-  if (std::any_of(shape.begin(), shape.end(), [](int i) { return i < 0; })) {
-    if (location)
-      context->emitError(*location, "vector types must have static shape");
-    return {};
-  }
-
-  auto &impl = context->getImpl();
-
-  // Look to see if we already have this vector type.
-  VectorTypeKeyInfo::KeyTy key(elementType, shape);
-  auto existing = impl.vectors.insert_as(nullptr, key);
-
-  // If we already have it, return that value.
-  if (!existing.second)
-    return *existing.first;
-
-  // On the first use, we allocate them into the bump pointer.
-  auto *result = impl.allocator.Allocate<VectorTypeStorage>();
-
-  // Copy the shape into the bump pointer.
-  shape = impl.copyInto(shape);
-
-  // Initialize the memory using placement new.
-  new (result) VectorTypeStorage{
-      {{Type::Kind::Vector, context, static_cast<unsigned int>(shape.size())},
-       elementType},
-      shape.data()};
-
-  // Cache and return it.
-  return *existing.first = result;
-}
-
-// Try constructing a VectorType, report errors and return a nullptr on failure.
-VectorType VectorType::getChecked(ArrayRef<int> shape, Type elementType,
-                                  Location location) {
-  return getVectorType(shape, elementType, location);
-}
-
-// Try constructing a VectorType, supressing error messages, abort on failure.
-VectorType VectorType::get(ArrayRef<int> shape, Type elementType) {
-  auto type = getVectorType(shape, elementType, None);
-  assert(type && "failed to construct a VectorType");
-  return type;
-}
-
-// Check if "elementType" can be an element type of a tensor. Emit errors if
-// location is not nullptr.  Returns true of check failed.
-static inline bool checkTensorElementType(Type elementType,
-                                          Optional<Location> location) {
-  auto *context = elementType.getContext();
-  if (!TensorType::isValidElementType(elementType)) {
-    if (location)
-      context->emitError(*location, "invalid tensor element type");
-    return true;
-  }
-  return false;
-}
-
-/// Get or create a new RankedTensorType defined by the arguments.  If the
-/// resulting type would be ill-formed, return nullptr.  If the location is
-/// provided, i.e. is not nullptr, emit detailed error messages.  To emit errors
-/// when the location is unknown, pass in an instance of UnknownLoc.
-static RankedTensorType getRankedTensorType(ArrayRef<int> shape,
-                                            Type elementType,
-                                            Optional<Location> location) {
-  if (checkTensorElementType(elementType, location))
-    return nullptr;
-
-  auto *context = elementType.getContext();
-  auto &impl = context->getImpl();
-
-  // Look to see if we already have this ranked tensor type.
-  RankedTensorTypeKeyInfo::KeyTy key(elementType, shape);
-  auto existing = impl.rankedTensors.insert_as(nullptr, key);
-
-  // If we already have it, return that value.
-  if (!existing.second)
-    return *existing.first;
-
-  // On the first use, we allocate them into the bump pointer.
-  auto *result = impl.allocator.Allocate<RankedTensorTypeStorage>();
-
-  // Copy the shape into the bump pointer.
-  shape = impl.copyInto(shape);
-
-  // Initialize the memory using placement new.
-  new (result)
-      RankedTensorTypeStorage{{{{Type::Kind::RankedTensor, context,
-                                 static_cast<unsigned int>(shape.size())},
-                                elementType}},
-                              shape.data()};
-
-  // Cache and return it.
-  return *existing.first = result;
-}
-
-RankedTensorType RankedTensorType::get(ArrayRef<int> shape, Type elementType) {
-  auto type = getRankedTensorType(shape, elementType, None);
-  assert(type && "failed to construct RankedTensorType");
-  return type;
-}
-
-RankedTensorType RankedTensorType::getChecked(ArrayRef<int> shape,
-                                              Type elementType,
-                                              Location location) {
-  return getRankedTensorType(shape, elementType, location);
-}
-
-/// Get or create a new UnrankedTensorType defined by the arguments.  If the
-/// resulting type would be ill-formed, return nullptr.  If the location is
-/// provided, i.e. is not nullptr, emit detailed error messages.  To emit errors
-/// when the location is unknown, pass in an instance of UnknownLoc.
-static UnrankedTensorType getUnrankedTensorType(Type elementType,
-                                                Optional<Location> location) {
-  if (checkTensorElementType(elementType, location))
-    return nullptr;
-
-  auto *context = elementType.getContext();
-  auto &impl = context->getImpl();
-
-  // Look to see if we already have this unranked tensor type.
-  auto *&result = impl.unrankedTensors[elementType];
-
-  // If we already have it, return that value.
-  if (result)
-    return result;
-
-  // On the first use, we allocate them into the bump pointer.
-  result = impl.allocator.Allocate<UnrankedTensorTypeStorage>();
-
-  // Initialize the memory using placement new.
-  new (result) UnrankedTensorTypeStorage{
-      {{{Type::Kind::UnrankedTensor, context}, elementType}}};
-  return result;
-}
-
-UnrankedTensorType UnrankedTensorType::get(Type elementType) {
-  auto type = getUnrankedTensorType(elementType, None);
-  assert(type && "failed to construct UnrankedTensorType");
-  return type;
-}
-
-UnrankedTensorType UnrankedTensorType::getChecked(Type elementType,
-                                                  Location location) {
-  return getUnrankedTensorType(elementType, location);
-}
-
-/// Get or create a new MemRefType defined by the arguments.  If the resulting
-/// type would be ill-formed, return nullptr.  If the location is provided,
-/// emit detailed error messages.  To emit errors when the location is unknown,
-/// pass in an instance of UnknownLoc.
-static MemRefType getMemRefType(ArrayRef<int> shape, Type elementType,
-                                ArrayRef<AffineMap> affineMapComposition,
-                                unsigned memorySpace,
-                                Optional<Location> location) {
-  auto *context = elementType.getContext();
-  auto &impl = context->getImpl();
-
-  // Check that memref is formed from allowed types.
-  if (!elementType.isa<IntegerType>() && !elementType.isa<FloatType>() &&
-      !elementType.isa<VectorType>() && !elementType.isa<IntegerType>()) {
-    if (location.hasValue())
-      context->emitDiagnostic(*location, "invalid memref element type",
-                              MLIRContext::DiagnosticKind::Error);
-    return nullptr;
-  }
-
-  // Check that the structure of the composition is valid, i.e. that each
-  // subsequent affine map has as many inputs as the previous map has results.
-  // Take the dimensionality of the MemRef for the first map.
-  auto dim = shape.size();
-  unsigned i = 0;
-  for (const auto &affineMap : affineMapComposition) {
-    if (affineMap.getNumDims() != dim) {
-      if (location.hasValue())
-        context->emitDiagnostic(
-            *location,
-            "memref affine map dimension mismatch between " +
-                (i == 0 ? Twine("memref rank") : "affine map " + Twine(i)) +
-                " and affine map" + Twine(i + 1) + ": " + Twine(dim) +
-                " != " + Twine(affineMap.getNumDims()),
-            MLIRContext::DiagnosticKind::Error);
-      return nullptr;
-    }
-
-    dim = affineMap.getNumResults();
-    ++i;
-  }
-
-  // Drop the unbounded identity maps from the composition.
-  // This may lead to the composition becoming empty, which is interpreted as an
-  // implicit identity.
-  llvm::SmallVector<AffineMap, 2> cleanedAffineMapComposition;
-  for (const auto &map : affineMapComposition) {
-    if (map.isIdentity() && !map.isBounded())
-      continue;
-    cleanedAffineMapComposition.push_back(map);
-  }
-  affineMapComposition = cleanedAffineMapComposition;
-
-  // Look to see if we already have this memref type.
-  auto key =
-      std::make_tuple(elementType, shape, affineMapComposition, memorySpace);
-  auto existing = impl.memrefs.insert_as(nullptr, key);
-
-  // If we already have it, return that value.
-  if (!existing.second)
-    return *existing.first;
-
-  // On the first use, we allocate them into the bump pointer.
-  auto *result = impl.allocator.Allocate<MemRefTypeStorage>();
-
-  // Copy the shape into the bump pointer.
-  shape = impl.copyInto(shape);
-
-  // Copy the affine map composition into the bump pointer.
-  affineMapComposition =
-      impl.copyInto(ArrayRef<AffineMap>(affineMapComposition));
-
-  // Initialize the memory using placement new.
-  new (result) MemRefTypeStorage{
-      {Type::Kind::MemRef, context, static_cast<unsigned int>(shape.size())},
-      elementType,
-      shape.data(),
-      static_cast<unsigned int>(affineMapComposition.size()),
-      affineMapComposition.data(),
-      memorySpace};
-  // Cache and return it.
-  return *existing.first = result;
-}
-
-// Try constructing a MemRefType, report errors and return a nullptr on failure.
-MemRefType MemRefType::getChecked(ArrayRef<int> shape, Type elementType,
-                                  ArrayRef<AffineMap> affineMapComposition,
-                                  unsigned memorySpace, Location location) {
-  return getMemRefType(shape, elementType, affineMapComposition, memorySpace,
-                       location);
-}
-
-// Try constructing a MemRefType, supressing error messages, abort on failure.
-MemRefType MemRefType::get(ArrayRef<int> shape, Type elementType,
-                           ArrayRef<AffineMap> affineMapComposition,
-                           unsigned memorySpace) {
-  auto type =
-      getMemRefType(shape, elementType, affineMapComposition, memorySpace, {});
-  assert(type && "failed to construct a MemRef type");
-  return type;
+/// Get an instance of the NoneType.
+NoneType NoneType::get(MLIRContext *context) {
+  if (NoneType cachedInst = context->getImpl().noneType)
+    return cachedInst;
+  // Note: May happen when initializing the singleton attributes of the builtin
+  // dialect.
+  return Base::get(context);
 }
 
 //===----------------------------------------------------------------------===//
 // Attribute uniquing
 //===----------------------------------------------------------------------===//
 
-BoolAttr BoolAttr::get(bool value, MLIRContext *context) {
-  auto *&result = context->getImpl().boolAttrs[value];
-  if (result)
-    return result;
-
-  result = context->getImpl().allocator.Allocate<BoolAttributeStorage>();
-  new (result) BoolAttributeStorage{{Attribute::Kind::Bool,
-                                     /*isOrContainsFunction=*/false},
-                                    value};
-  return result;
+/// Returns the storage uniquer used for constructing attribute storage
+/// instances. This should not be used directly.
+StorageUniquer &MLIRContext::getAttributeUniquer() {
+  return getImpl().attributeUniquer;
 }
 
-IntegerAttr IntegerAttr::get(Type type, const APInt &value) {
-  auto &impl = type.getContext()->getImpl();
-
-  // Look to see if the integer attribute has been created already.
-  IntegerAttrKeyInfo::KeyTy key({type, value});
-  auto existing = impl.integerAttrs.insert_as(nullptr, key);
-
-  // If it has been created, return it.
-  if (!existing.second)
-    return *existing.first;
-
-  // If it doesn't, create one and return it.
-  auto elements = ArrayRef<uint64_t>(value.getRawData(), value.getNumWords());
-
-  auto byteSize =
-      IntegerAttributeStorage::totalSizeToAlloc<uint64_t>(elements.size());
-  auto rawMem =
-      impl.allocator.Allocate(byteSize, alignof(IntegerAttributeStorage));
-  // TODO: This uses 64 bit APInts by default without consideration of value.
-  auto result = ::new (rawMem) IntegerAttributeStorage{
-      {Attribute::Kind::Integer, /*isOrContainsFunction=*/false},
-      type,
-      elements.size()};
-  std::uninitialized_copy(elements.begin(), elements.end(),
-                          result->getTrailingObjects<uint64_t>());
-  return *existing.first = result;
+/// Initialize the given attribute storage instance.
+void AttributeUniquer::initializeAttributeStorage(AttributeStorage *storage,
+                                                  MLIRContext *ctx,
+                                                  TypeID attrID) {
+  storage->initializeAbstractAttribute(AbstractAttribute::lookup(attrID, ctx));
 }
 
-IntegerAttr IntegerAttr::get(Type type, int64_t value) {
-  // This uses 64 bit APInts by default for index type.
-  auto width = type.isIndex() ? 64 : type.getBitWidth();
-  return get(type, APInt(width, value));
+BoolAttr BoolAttr::get(MLIRContext *context, bool value) {
+  return value ? context->getImpl().trueAttr : context->getImpl().falseAttr;
 }
 
-FloatAttr FloatAttr::get(Type type, double value) {
-  return get(type, APFloat(value));
+UnitAttr UnitAttr::get(MLIRContext *context) {
+  return context->getImpl().unitAttr;
 }
 
-FloatAttr FloatAttr::get(Type type, const APFloat &value) {
-  auto &impl = type.getContext()->getImpl();
-
-  // Look to see if the float attribute has been created already.
-  FloatAttrKeyInfo::KeyTy key({type, value});
-  auto existing = impl.floatAttrs.insert_as(nullptr, key);
-
-  // If it has been created, return it.
-  if (!existing.second)
-    return *existing.first;
-
-  // If it doesn't, create one, unique it and return it.
-  const auto &apint = value.bitcastToAPInt();
-  // Here one word's bitwidth equals to that of uint64_t.
-  auto elements = ArrayRef<uint64_t>(apint.getRawData(), apint.getNumWords());
-
-  auto byteSize =
-      FloatAttributeStorage::totalSizeToAlloc<uint64_t>(elements.size());
-  auto rawMem =
-      impl.allocator.Allocate(byteSize, alignof(FloatAttributeStorage));
-  auto result = ::new (rawMem) FloatAttributeStorage{
-      {Attribute::Kind::Float, /*isOrContainsFunction=*/false},
-      value.getSemantics(),
-      type,
-      elements.size()};
-  std::uninitialized_copy(elements.begin(), elements.end(),
-                          result->getTrailingObjects<uint64_t>());
-  return *existing.first = result;
+UnknownLoc UnknownLoc::get(MLIRContext *context) {
+  return context->getImpl().unknownLocAttr;
 }
 
-StringAttr StringAttr::get(StringRef bytes, MLIRContext *context) {
-  auto it = context->getImpl().stringAttrs.insert({bytes, nullptr}).first;
-
-  if (it->second)
-    return it->second;
-
-  auto result = context->getImpl().allocator.Allocate<StringAttributeStorage>();
-  new (result) StringAttributeStorage{{Attribute::Kind::String,
-                                       /*isOrContainsFunction=*/false},
-                                      it->first()};
-  it->second = result;
-  return result;
+DistinctAttrStorage *
+detail::DistinctAttributeUniquer::allocateStorage(MLIRContext *context,
+                                                  Attribute referencedAttr) {
+  return context->getImpl().distinctAttributeAllocator.allocate(referencedAttr);
 }
 
-ArrayAttr ArrayAttr::get(ArrayRef<Attribute> value, MLIRContext *context) {
-  auto &impl = context->getImpl();
-
-  // Look to see if we already have this.
-  auto existing = impl.arrayAttrs.insert_as(nullptr, value);
-
-  // If we already have it, return that value.
-  if (!existing.second)
-    return *existing.first;
-
-  // On the first use, we allocate them into the bump pointer.
-  auto *result = impl.allocator.Allocate<ArrayAttributeStorage>();
-
-  // Copy the elements into the bump pointer.
-  value = impl.copyInto(value);
-
-  // Check to see if any of the elements have a function attr.
-  bool hasFunctionAttr = false;
-  for (auto elt : value)
-    if (elt.isOrContainsFunction()) {
-      hasFunctionAttr = true;
-      break;
-    }
-
-  // Initialize the memory using placement new.
-  new (result)
-      ArrayAttributeStorage{{Attribute::Kind::Array, hasFunctionAttr}, value};
-
-  // Cache and return it.
-  return *existing.first = result;
+/// Return empty dictionary.
+DictionaryAttr DictionaryAttr::getEmpty(MLIRContext *context) {
+  return context->getImpl().emptyDictionaryAttr;
 }
 
-AffineMapAttr AffineMapAttr::get(AffineMap value) {
-  auto *context = value.getResult(0).getContext();
-  auto &result = context->getImpl().affineMapAttrs[value];
-  if (result)
-    return result;
-
-  result = context->getImpl().allocator.Allocate<AffineMapAttributeStorage>();
-  new (result) AffineMapAttributeStorage{{Attribute::Kind::AffineMap,
-                                          /*isOrContainsFunction=*/false},
-                                         value};
-  return result;
-}
-
-IntegerSetAttr IntegerSetAttr::get(IntegerSet value) {
-  auto *context = value.getConstraint(0).getContext();
-  auto &result = context->getImpl().integerSetAttrs[value];
-  if (result)
-    return result;
-
-  result = context->getImpl().allocator.Allocate<IntegerSetAttributeStorage>();
-  new (result) IntegerSetAttributeStorage{{Attribute::Kind::IntegerSet,
-                                           /*isOrContainsFunction=*/false},
-                                          value};
-  return result;
-}
-
-TypeAttr TypeAttr::get(Type type, MLIRContext *context) {
-  auto *&result = context->getImpl().typeAttrs[type];
-  if (result)
-    return result;
-
-  result = context->getImpl().allocator.Allocate<TypeAttributeStorage>();
-  new (result) TypeAttributeStorage{{Attribute::Kind::Type,
-                                     /*isOrContainsFunction=*/false},
-                                    type};
-  return result;
-}
-
-FunctionAttr FunctionAttr::get(const Function *value, MLIRContext *context) {
-  assert(value && "Cannot get FunctionAttr for a null function");
-
-  auto *&result = context->getImpl().functionAttrs[value];
-  if (result)
-    return result;
-
-  result = context->getImpl().allocator.Allocate<FunctionAttributeStorage>();
-  new (result) FunctionAttributeStorage{{Attribute::Kind::Function,
-                                         /*isOrContainsFunction=*/true},
-                                        const_cast<Function *>(value)};
-  return result;
-}
-
-/// This function is used by the internals of the Function class to null out
-/// attributes refering to functions that are about to be deleted.
-void FunctionAttr::dropFunctionReference(Function *value) {
-  // Check to see if there was an attribute referring to this function.
-  auto &functionAttrs = value->getContext()->getImpl().functionAttrs;
-
-  // If not, then we're done.
-  auto it = functionAttrs.find(value);
-  if (it == functionAttrs.end())
+void StringAttrStorage::initialize(MLIRContext *context) {
+  // Check for a dialect namespace prefix, if there isn't one we don't need to
+  // do any additional initialization.
+  auto dialectNamePair = value.split('.');
+  if (dialectNamePair.first.empty() || dialectNamePair.second.empty())
     return;
 
-  // If so, null out the function reference in the attribute (to avoid dangling
-  // pointers) and remove the entry from the map so the map doesn't contain
-  // dangling keys.
-  it->second->value = nullptr;
-  functionAttrs.erase(it);
+  // If one exists, we check to see if this dialect is loaded. If it is, we set
+  // the dialect now, if it isn't we record this storage for initialization
+  // later if the dialect ever gets loaded.
+  if ((referencedDialect = context->getLoadedDialect(dialectNamePair.first)))
+    return;
+
+  MLIRContextImpl &impl = context->getImpl();
+  llvm::sys::SmartScopedLock<true> lock(impl.dialectRefStrAttrMutex);
+  impl.dialectReferencingStrAttrs[dialectNamePair.first].push_back(this);
 }
 
-/// Perform a three-way comparison between the names of the specified
-/// NamedAttributes.
-static int compareNamedAttributes(const NamedAttribute *lhs,
-                                  const NamedAttribute *rhs) {
-  return lhs->first.str().compare(rhs->first.str());
+/// Return an empty string.
+StringAttr StringAttr::get(MLIRContext *context) {
+  return context->getImpl().emptyStringAttr;
 }
 
-/// Given a list of NamedAttribute's, canonicalize the list (sorting
-/// by name) and return the unique'd result.  Note that the empty list is
-/// represented with a null pointer.
-AttributeListStorage *AttributeListStorage::get(ArrayRef<NamedAttribute> attrs,
-                                                MLIRContext *context) {
-  // We need to sort the element list to canonicalize it, but we also don't want
-  // to do a ton of work in the super common case where the element list is
-  // already sorted.
-  SmallVector<NamedAttribute, 8> storage;
-  switch (attrs.size()) {
-  case 0:
-    // An empty list is represented with a null pointer.
-    return nullptr;
-  case 1:
-    // A single element is already sorted.
-    break;
-  case 2:
-    // Don't invoke a general sort for two element case.
-    if (attrs[0].first.str() > attrs[1].first.str()) {
-      storage.push_back(attrs[1]);
-      storage.push_back(attrs[0]);
-      attrs = storage;
-    }
-    break;
-  default:
-    // Check to see they are sorted already.
-    bool isSorted = true;
-    for (unsigned i = 0, e = attrs.size() - 1; i != e; ++i) {
-      if (attrs[i].first.str() > attrs[i + 1].first.str()) {
-        isSorted = false;
-        break;
-      }
-    }
-    // If not, do a general sort.
-    if (!isSorted) {
-      storage.append(attrs.begin(), attrs.end());
-      llvm::array_pod_sort(storage.begin(), storage.end(),
-                           compareNamedAttributes);
-      attrs = storage;
-    }
-  }
+//===----------------------------------------------------------------------===//
+// AffineMap uniquing
+//===----------------------------------------------------------------------===//
 
+StorageUniquer &MLIRContext::getAffineUniquer() {
+  return getImpl().affineUniquer;
+}
+
+AffineMap AffineMap::getImpl(unsigned dimCount, unsigned symbolCount,
+                             ArrayRef<AffineExpr> results,
+                             MLIRContext *context) {
   auto &impl = context->getImpl();
-
-  // Look to see if we already have this.
-  auto existing = impl.attributeLists.insert_as(nullptr, attrs);
-
-  // If we already have it, return that value.
-  if (!existing.second)
-    return *existing.first;
-
-  // Otherwise, allocate a new AttributeListStorage, unique it and return it.
-  auto byteSize =
-      AttributeListStorage::totalSizeToAlloc<NamedAttribute>(attrs.size());
-  auto rawMem = impl.allocator.Allocate(byteSize, alignof(NamedAttribute));
-
-  //  Placement initialize the AggregateSymbolicValue.
-  auto result = ::new (rawMem) AttributeListStorage(attrs.size());
-  std::uninitialized_copy(attrs.begin(), attrs.end(),
-                          result->getTrailingObjects<NamedAttribute>());
-  return *existing.first = result;
+  auto *storage = impl.affineUniquer.get<AffineMapStorage>(
+      [&](AffineMapStorage *storage) { storage->context = context; }, dimCount,
+      symbolCount, results);
+  return AffineMap(storage);
 }
 
-SplatElementsAttr SplatElementsAttr::get(VectorOrTensorType type,
-                                         Attribute elt) {
-  auto &impl = type.getContext()->getImpl();
-
-  // Look to see if we already have this.
-  auto *&result = impl.splatElementsAttrs[{type, elt}];
-
-  // If we already have it, return that value.
-  if (result)
-    return result;
-
-  // Otherwise, allocate them into the bump pointer.
-  result = impl.allocator.Allocate<SplatElementsAttributeStorage>();
-  new (result) SplatElementsAttributeStorage{{{Attribute::Kind::SplatElements,
-                                               /*isOrContainsFunction=*/false},
-                                              type},
-                                             elt};
-
-  return result;
-}
-
-DenseElementsAttr DenseElementsAttr::get(VectorOrTensorType type,
-                                         ArrayRef<char> data) {
-  auto bitsRequired = (long)type.getBitWidth() * type.getNumElements();
-  (void)bitsRequired;
-  assert((bitsRequired <= data.size() * 8L) &&
-         "Input data bit size should be larger than that type requires");
-
-  auto &impl = type.getContext()->getImpl();
-
-  // Look to see if this constant is already defined.
-  DenseElementsAttrInfo::KeyTy key({type, data});
-  auto existing = impl.denseElementsAttrs.insert_as(nullptr, key);
-
-  // If we already have it, return that value.
-  if (!existing.second)
-    return *existing.first;
-
-  // Otherwise, allocate a new one, unique it and return it.
-  auto eltType = type.getElementType();
-  switch (eltType.getKind()) {
-  case Type::Kind::BF16:
-  case Type::Kind::F16:
-  case Type::Kind::F32:
-  case Type::Kind::F64: {
-    auto *result = impl.allocator.Allocate<DenseFPElementsAttributeStorage>();
-    auto *copy = (char *)impl.allocator.Allocate(data.size(), 64);
-    std::uninitialized_copy(data.begin(), data.end(), copy);
-    new (result) DenseFPElementsAttributeStorage{
-        {{{Attribute::Kind::DenseFPElements, /*isOrContainsFunction=*/false},
-          type},
-         {copy, data.size()}}};
-    return *existing.first = result;
+/// Check whether the arguments passed to the AffineMap::get() are consistent.
+/// This method checks whether the highest index of dimensional identifier
+/// present in result expressions is less than `dimCount` and the highest index
+/// of symbolic identifier present in result expressions is less than
+/// `symbolCount`.
+LLVM_ATTRIBUTE_UNUSED static bool
+willBeValidAffineMap(unsigned dimCount, unsigned symbolCount,
+                     ArrayRef<AffineExpr> results) {
+  int64_t maxDimPosition = -1;
+  int64_t maxSymbolPosition = -1;
+  getMaxDimAndSymbol(ArrayRef<ArrayRef<AffineExpr>>(results), maxDimPosition,
+                     maxSymbolPosition);
+  if ((maxDimPosition >= dimCount) || (maxSymbolPosition >= symbolCount)) {
+    LLVM_DEBUG(
+        llvm::dbgs()
+        << "maximum dimensional identifier position in result expression must "
+           "be less than `dimCount` and maximum symbolic identifier position "
+           "in result expression must be less than `symbolCount`\n");
+    return false;
   }
-  case Type::Kind::Integer: {
-    auto width = eltType.cast<IntegerType>().getWidth();
-    auto *result = impl.allocator.Allocate<DenseIntElementsAttributeStorage>();
-    auto *copy = (char *)impl.allocator.Allocate(data.size(), 64);
-    std::uninitialized_copy(data.begin(), data.end(), copy);
-    new (result) DenseIntElementsAttributeStorage{
-        {{{Attribute::Kind::DenseIntElements, /*isOrContainsFunction=*/false},
-          type},
-         {copy, data.size()}},
-        width};
-    return *existing.first = result;
-  }
-  default:
-    llvm_unreachable("unexpected element type");
-  }
+  return true;
 }
 
-OpaqueElementsAttr OpaqueElementsAttr::get(VectorOrTensorType type,
-                                           StringRef bytes) {
-  assert(TensorType::isValidElementType(type.getElementType()) &&
-         "Input element type should be a valid tensor element type");
-
-  auto &impl = type.getContext()->getImpl();
-
-  // Look to see if this constant is already defined.
-  OpaqueElementsAttrInfo::KeyTy key({type, bytes});
-  auto existing = impl.opaqueElementsAttrs.insert_as(nullptr, key);
-
-  // If we already have it, return that value.
-  if (!existing.second)
-    return *existing.first;
-
-  // Otherwise, allocate a new one, unique it and return it.
-  auto *result = impl.allocator.Allocate<OpaqueElementsAttributeStorage>();
-  bytes = bytes.copy(impl.allocator);
-  new (result) OpaqueElementsAttributeStorage{
-      {{Attribute::Kind::OpaqueElements, /*isOrContainsFunction=*/false}, type},
-      bytes};
-  return *existing.first = result;
+AffineMap AffineMap::get(MLIRContext *context) {
+  return getImpl(/*dimCount=*/0, /*symbolCount=*/0, /*results=*/{}, context);
 }
-
-SparseElementsAttr SparseElementsAttr::get(VectorOrTensorType type,
-                                           DenseIntElementsAttr indices,
-                                           DenseElementsAttr values) {
-  auto &impl = type.getContext()->getImpl();
-
-  // Look to see if we already have this.
-  auto key = std::make_tuple(type, indices, values);
-  auto *&result = impl.sparseElementsAttrs[key];
-
-  // If we already have it, return that value.
-  if (result)
-    return result;
-
-  // Otherwise, allocate them into the bump pointer.
-  result = impl.allocator.Allocate<SparseElementsAttributeStorage>();
-  new (result) SparseElementsAttributeStorage{{{Attribute::Kind::SparseElements,
-                                                /*isOrContainsFunction=*/false},
-                                               type},
-                                              indices,
-                                              values};
-
-  return result;
-}
-
-//===----------------------------------------------------------------------===//
-// AffineMap and AffineExpr uniquing
-//===----------------------------------------------------------------------===//
 
 AffineMap AffineMap::get(unsigned dimCount, unsigned symbolCount,
-                         ArrayRef<AffineExpr> results,
-                         ArrayRef<AffineExpr> rangeSizes) {
-  // The number of results can't be zero.
-  assert(!results.empty());
-
-  assert(rangeSizes.empty() || results.size() == rangeSizes.size());
-
-  auto &impl = results[0].getContext()->getImpl();
-
-  // Check if we already have this affine map.
-  auto key = std::make_tuple(dimCount, symbolCount, results, rangeSizes);
-  auto existing = impl.affineMaps.insert_as(AffineMap(nullptr), key);
-
-  // If we already have it, return that value.
-  if (!existing.second)
-    return *existing.first;
-
-  // On the first use, we allocate them into the bump pointer.
-  auto *res = impl.allocator.Allocate<detail::AffineMapStorage>();
-
-  // Copy the results and range sizes into the bump pointer.
-  results = impl.copyInto(results);
-  rangeSizes = impl.copyInto(rangeSizes);
-
-  // Initialize the memory using placement new.
-  new (res)
-      detail::AffineMapStorage{dimCount, symbolCount, results, rangeSizes};
-
-  // Cache and return it.
-  return *existing.first = AffineMap(res);
+                         MLIRContext *context) {
+  return getImpl(dimCount, symbolCount, /*results=*/{}, context);
 }
 
-/// Simplify add expression. Return nullptr if it can't be simplified.
-static AffineExpr simplifyAdd(AffineExpr lhs, AffineExpr rhs) {
-  auto lhsConst = lhs.dyn_cast<AffineConstantExpr>();
-  auto rhsConst = rhs.dyn_cast<AffineConstantExpr>();
-  // Fold if both LHS, RHS are a constant.
-  if (lhsConst && rhsConst)
-    return getAffineConstantExpr(lhsConst.getValue() + rhsConst.getValue(),
-                                 lhs.getContext());
-
-  // Canonicalize so that only the RHS is a constant. (4 + d0 becomes d0 + 4).
-  // If only one of them is a symbolic expressions, make it the RHS.
-  if (lhs.isa<AffineConstantExpr>() ||
-      (lhs.isSymbolicOrConstant() && !rhs.isSymbolicOrConstant())) {
-    return rhs + lhs;
-  }
-
-  // At this point, if there was a constant, it would be on the right.
-
-  // Addition with a zero is a noop, return the other input.
-  if (rhsConst) {
-    if (rhsConst.getValue() == 0)
-      return lhs;
-  }
-  // Fold successive additions like (d0 + 2) + 3 into d0 + 5.
-  auto lBin = lhs.dyn_cast<AffineBinaryOpExpr>();
-  if (lBin && rhsConst && lBin.getKind() == AffineExprKind::Add) {
-    if (auto lrhs = lBin.getRHS().dyn_cast<AffineConstantExpr>())
-      return lBin.getLHS() + (lrhs.getValue() + rhsConst.getValue());
-  }
-
-  // When doing successive additions, bring constant to the right: turn (d0 + 2)
-  // + d1 into (d0 + d1) + 2.
-  if (lBin && lBin.getKind() == AffineExprKind::Add) {
-    if (auto lrhs = lBin.getRHS().dyn_cast<AffineConstantExpr>()) {
-      return lBin.getLHS() + rhs + lrhs;
-    }
-  }
-
-  return nullptr;
+AffineMap AffineMap::get(unsigned dimCount, unsigned symbolCount,
+                         AffineExpr result) {
+  assert(willBeValidAffineMap(dimCount, symbolCount, {result}));
+  return getImpl(dimCount, symbolCount, {result}, result.getContext());
 }
 
-/// Simplify a multiply expression. Return nullptr if it can't be simplified.
-static AffineExpr simplifyMul(AffineExpr lhs, AffineExpr rhs) {
-  auto lhsConst = lhs.dyn_cast<AffineConstantExpr>();
-  auto rhsConst = rhs.dyn_cast<AffineConstantExpr>();
-
-  if (lhsConst && rhsConst)
-    return getAffineConstantExpr(lhsConst.getValue() * rhsConst.getValue(),
-                                 lhs.getContext());
-
-  assert(lhs.isSymbolicOrConstant() || rhs.isSymbolicOrConstant());
-
-  // Canonicalize the mul expression so that the constant/symbolic term is the
-  // RHS. If both the lhs and rhs are symbolic, swap them if the lhs is a
-  // constant. (Note that a constant is trivially symbolic).
-  if (!rhs.isSymbolicOrConstant() || lhs.isa<AffineConstantExpr>()) {
-    // At least one of them has to be symbolic.
-    return rhs * lhs;
-  }
-
-  // At this point, if there was a constant, it would be on the right.
-
-  // Multiplication with a one is a noop, return the other input.
-  if (rhsConst) {
-    if (rhsConst.getValue() == 1)
-      return lhs;
-    // Multiplication with zero.
-    if (rhsConst.getValue() == 0)
-      return rhsConst;
-  }
-
-  // Fold successive multiplications: eg: (d0 * 2) * 3 into d0 * 6.
-  auto lBin = lhs.dyn_cast<AffineBinaryOpExpr>();
-  if (lBin && rhsConst && lBin.getKind() == AffineExprKind::Mul) {
-    if (auto lrhs = lBin.getRHS().dyn_cast<AffineConstantExpr>())
-      return lBin.getLHS() * (lrhs.getValue() * rhsConst.getValue());
-  }
-
-  // When doing successive multiplication, bring constant to the right: turn (d0
-  // * 2) * d1 into (d0 * d1) * 2.
-  if (lBin && lBin.getKind() == AffineExprKind::Mul) {
-    if (auto lrhs = lBin.getRHS().dyn_cast<AffineConstantExpr>()) {
-      return (lBin.getLHS() * rhs) * lrhs;
-    }
-  }
-
-  return nullptr;
-}
-
-static AffineExpr simplifyFloorDiv(AffineExpr lhs, AffineExpr rhs) {
-  auto lhsConst = lhs.dyn_cast<AffineConstantExpr>();
-  auto rhsConst = rhs.dyn_cast<AffineConstantExpr>();
-
-  if (!rhsConst || rhsConst.getValue() < 1)
-    return nullptr;
-
-  if (lhsConst)
-    return getAffineConstantExpr(
-        floorDiv(lhsConst.getValue(), rhsConst.getValue()), lhs.getContext());
-
-  // Fold floordiv of a multiply with a constant that is a multiple of the
-  // divisor. Eg: (i * 128) floordiv 64 = i * 2.
-  if (rhsConst.getValue() == 1)
-    return lhs;
-
-  auto lBin = lhs.dyn_cast<AffineBinaryOpExpr>();
-  if (lBin && lBin.getKind() == AffineExprKind::Mul) {
-    if (auto lrhs = lBin.getRHS().dyn_cast<AffineConstantExpr>()) {
-      // rhsConst is known to be positive if a constant.
-      if (lrhs.getValue() % rhsConst.getValue() == 0)
-        return lBin.getLHS() * (lrhs.getValue() / rhsConst.getValue());
-    }
-  }
-
-  return nullptr;
-}
-
-static AffineExpr simplifyCeilDiv(AffineExpr lhs, AffineExpr rhs) {
-  auto lhsConst = lhs.dyn_cast<AffineConstantExpr>();
-  auto rhsConst = rhs.dyn_cast<AffineConstantExpr>();
-
-  if (!rhsConst || rhsConst.getValue() < 1)
-    return nullptr;
-
-  if (lhsConst)
-    return getAffineConstantExpr(
-        ceilDiv(lhsConst.getValue(), rhsConst.getValue()), lhs.getContext());
-
-  // Fold ceildiv of a multiply with a constant that is a multiple of the
-  // divisor. Eg: (i * 128) ceildiv 64 = i * 2.
-  if (rhsConst.getValue() == 1)
-    return lhs;
-
-  auto lBin = lhs.dyn_cast<AffineBinaryOpExpr>();
-  if (lBin && lBin.getKind() == AffineExprKind::Mul) {
-    if (auto lrhs = lBin.getRHS().dyn_cast<AffineConstantExpr>()) {
-      // rhsConst is known to be positive if a constant.
-      if (lrhs.getValue() % rhsConst.getValue() == 0)
-        return lBin.getLHS() * (lrhs.getValue() / rhsConst.getValue());
-    }
-  }
-
-  return nullptr;
-}
-
-static AffineExpr simplifyMod(AffineExpr lhs, AffineExpr rhs) {
-  auto lhsConst = lhs.dyn_cast<AffineConstantExpr>();
-  auto rhsConst = rhs.dyn_cast<AffineConstantExpr>();
-
-  if (!rhsConst || rhsConst.getValue() < 1)
-    return nullptr;
-
-  if (lhsConst)
-    return getAffineConstantExpr(mod(lhsConst.getValue(), rhsConst.getValue()),
-                                 lhs.getContext());
-
-  // Fold modulo of an expression that is known to be a multiple of a constant
-  // to zero if that constant is a multiple of the modulo factor. Eg: (i * 128)
-  // mod 64 is folded to 0, and less trivially, (i*(j*4*(k*32))) mod 128 = 0.
-  if (lhs.getLargestKnownDivisor() % rhsConst.getValue() == 0)
-    return getAffineConstantExpr(0, lhs.getContext());
-
-  return nullptr;
-  // TODO(bondhugula): In general, this can be simplified more by using the GCD
-  // test, or in general using quantifier elimination (add two new variables q
-  // and r, and eliminate all variables from the linear system other than r. All
-  // of this can be done through mlir/Analysis/'s FlatAffineConstraints.
-}
-
-/// Return a binary affine op expression with the specified op type and
-/// operands: if it doesn't exist, create it and store it; if it is already
-/// present, return from the list. The stored expressions are unique: they are
-/// constructed and stored in a simplified/canonicalized form. The result after
-/// simplification could be any form of affine expression.
-AffineExpr AffineBinaryOpExprStorage::get(AffineExprKind kind, AffineExpr lhs,
-                                          AffineExpr rhs) {
-  auto &impl = lhs.getContext()->getImpl();
-
-  // Check if we already have this affine expression, and return it if we do.
-  auto keyValue = std::make_tuple((unsigned)kind, lhs, rhs);
-  auto cached = impl.affineExprs.find(keyValue);
-  if (cached != impl.affineExprs.end())
-    return cached->second;
-
-  // Simplify the expression if possible.
-  AffineExpr simplified;
-  switch (kind) {
-  case AffineExprKind::Add:
-    simplified = simplifyAdd(lhs, rhs);
-    break;
-  case AffineExprKind::Mul:
-    simplified = simplifyMul(lhs, rhs);
-    break;
-  case AffineExprKind::FloorDiv:
-    simplified = simplifyFloorDiv(lhs, rhs);
-    break;
-  case AffineExprKind::CeilDiv:
-    simplified = simplifyCeilDiv(lhs, rhs);
-    break;
-  case AffineExprKind::Mod:
-    simplified = simplifyMod(lhs, rhs);
-    break;
-  default:
-    llvm_unreachable("unexpected binary affine expr");
-  }
-
-  // The simplified one would have already been cached; just return it.
-  if (simplified)
-    return simplified;
-
-  // An expression with these operands will already be in the
-  // simplified/canonical form. Create and store it.
-  auto *result = impl.allocator.Allocate<AffineBinaryOpExprStorage>();
-  // Initialize the memory using placement new.
-  new (result) AffineBinaryOpExprStorage{{kind, lhs.getContext()}, lhs, rhs};
-  bool inserted = impl.affineExprs.insert({keyValue, result}).second;
-  assert(inserted && "the expression shouldn't already exist in the map");
-  (void)inserted;
-  return result;
-}
-
-AffineExpr mlir::getAffineDimExpr(unsigned position, MLIRContext *context) {
-  auto &impl = context->getImpl();
-
-  // Check if we need to resize.
-  if (position >= impl.dimExprs.size())
-    impl.dimExprs.resize(position + 1, nullptr);
-
-  auto *&result = impl.dimExprs[position];
-  if (result)
-    return result;
-
-  result = impl.allocator.Allocate<AffineDimExprStorage>();
-  // Initialize the memory using placement new.
-  new (result) AffineDimExprStorage{{AffineExprKind::DimId, context}, position};
-  return result;
-}
-
-AffineExpr mlir::getAffineSymbolExpr(unsigned position, MLIRContext *context) {
-  auto &impl = context->getImpl();
-
-  // Check if we need to resize.
-  if (position >= impl.symbolExprs.size())
-    impl.symbolExprs.resize(position + 1, nullptr);
-
-  auto *&result = impl.symbolExprs[position];
-  if (result)
-    return result;
-
-  result = impl.allocator.Allocate<AffineSymbolExprStorage>();
-  // Initialize the memory using placement new.
-  new (result)
-      AffineSymbolExprStorage{{AffineExprKind::SymbolId, context}, position};
-  return result;
-}
-
-AffineExpr mlir::getAffineConstantExpr(int64_t constant, MLIRContext *context) {
-  auto &impl = context->getImpl();
-  auto *&result = impl.constExprs[constant];
-
-  if (result)
-    return result;
-
-  result = impl.allocator.Allocate<AffineConstantExprStorage>();
-  // Initialize the memory using placement new.
-  new (result)
-      AffineConstantExprStorage{{AffineExprKind::Constant, context}, constant};
-  return result;
+AffineMap AffineMap::get(unsigned dimCount, unsigned symbolCount,
+                         ArrayRef<AffineExpr> results, MLIRContext *context) {
+  assert(willBeValidAffineMap(dimCount, symbolCount, results));
+  return getImpl(dimCount, symbolCount, results, context);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1785,35 +1235,24 @@ IntegerSet IntegerSet::get(unsigned dimCount, unsigned symbolCount,
   assert(!constraints.empty());
   assert(constraints.size() == eqFlags.size());
 
-  bool unique = constraints.size() < IntegerSet::kUniquingThreshold;
-
   auto &impl = constraints[0].getContext()->getImpl();
+  auto *storage = impl.affineUniquer.get<IntegerSetStorage>(
+      [](IntegerSetStorage *) {}, dimCount, symbolCount, constraints, eqFlags);
+  return IntegerSet(storage);
+}
 
-  std::pair<DenseSet<IntegerSet, IntegerSetKeyInfo>::Iterator, bool> existing;
-  if (unique) {
-    // Check if we already have this integer set.
-    auto key = std::make_tuple(dimCount, symbolCount, constraints, eqFlags);
-    existing = impl.integerSets.insert_as(IntegerSet(nullptr), key);
+//===----------------------------------------------------------------------===//
+// StorageUniquerSupport
+//===----------------------------------------------------------------------===//
 
-    // If we already have it, return that value.
-    if (!existing.second)
-      return *existing.first;
-  }
-
-  // On the first use, we allocate them into the bump pointer.
-  auto *res = impl.allocator.Allocate<detail::IntegerSetStorage>();
-
-  // Copy the results and equality flags into the bump pointer.
-  constraints = impl.copyInto(constraints);
-  eqFlags = impl.copyInto(eqFlags);
-
-  // Initialize the memory using placement new.
-  new (res)
-      detail::IntegerSetStorage{dimCount, symbolCount, constraints, eqFlags};
-
-  if (unique)
-    // Cache and return it.
-    return *existing.first = IntegerSet(res);
-
-  return IntegerSet(res);
+/// Utility method to generate a callback that can be used to generate a
+/// diagnostic when checking the construction invariants of a storage object.
+/// This is defined out-of-line to avoid the need to include Location.h.
+llvm::unique_function<InFlightDiagnostic()>
+mlir::detail::getDefaultDiagnosticEmitFn(MLIRContext *ctx) {
+  return [ctx] { return emitError(UnknownLoc::get(ctx)); };
+}
+llvm::unique_function<InFlightDiagnostic()>
+mlir::detail::getDefaultDiagnosticEmitFn(const Location &loc) {
+  return [=] { return emitError(loc); };
 }

@@ -1,134 +1,181 @@
 //===- Builders.h - Helpers for constructing MLIR Classes -------*- C++ -*-===//
 //
-// Copyright 2019 The MLIR Authors.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 #ifndef MLIR_IR_BUILDERS_H
 #define MLIR_IR_BUILDERS_H
 
-#include "mlir/IR/CFGFunction.h"
-#include "mlir/IR/MLFunction.h"
-#include "mlir/IR/Statements.h"
+#include "mlir/IR/OpDefinition.h"
+#include "llvm/Support/Compiler.h"
+#include <optional>
 
 namespace mlir {
 
 class AffineExpr;
-class Module;
+class IRMapping;
 class UnknownLoc;
-class UniquedFilename;
 class FileLineColLoc;
+class FileLineColRange;
 class Type;
-class PrimitiveType;
 class IntegerType;
+class FloatType;
 class FunctionType;
+class IndexType;
+class MemRefType;
 class VectorType;
 class RankedTensorType;
 class UnrankedTensorType;
+class TupleType;
+class NoneType;
 class BoolAttr;
 class IntegerAttr;
 class FloatAttr;
 class StringAttr;
 class TypeAttr;
 class ArrayAttr;
-class FunctionAttr;
+class SymbolRefAttr;
 class ElementsAttr;
 class DenseElementsAttr;
 class DenseIntElementsAttr;
 class AffineMapAttr;
 class AffineMap;
+class UnitAttr;
 
 /// This class is a general helper class for creating context-global objects
 /// like types, attributes, and affine expressions.
 class Builder {
 public:
   explicit Builder(MLIRContext *context) : context(context) {}
-  explicit Builder(Module *module);
+  explicit Builder(Operation *op) : Builder(op->getContext()) {}
 
   MLIRContext *getContext() const { return context; }
 
-  Identifier getIdentifier(StringRef str);
-  Module *createModule();
-
   // Locations.
-  UnknownLoc getUnknownLoc();
-  UniquedFilename getUniquedFilename(StringRef filename);
-  FileLineColLoc getFileLineColLoc(UniquedFilename filename, unsigned line,
-                                   unsigned column);
+  Location getUnknownLoc();
   Location getFusedLoc(ArrayRef<Location> locs,
                        Attribute metadata = Attribute());
 
   // Types.
+  FloatType getF8E8M0Type();
   FloatType getBF16Type();
   FloatType getF16Type();
+  FloatType getTF32Type();
   FloatType getF32Type();
   FloatType getF64Type();
+  FloatType getF80Type();
+  FloatType getF128Type();
 
   IndexType getIndexType();
 
-  OtherType getTFControlType();
-  OtherType getTFStringType();
-  OtherType getTFResourceType();
-  OtherType getTFVariantType();
-  OtherType getTFComplex64Type();
-  OtherType getTFComplex128Type();
-  OtherType getTFF32REFType();
-
+  IntegerType getI1Type();
+  IntegerType getI2Type();
+  IntegerType getI4Type();
+  IntegerType getI8Type();
+  IntegerType getI16Type();
+  IntegerType getI32Type();
+  IntegerType getI64Type();
   IntegerType getIntegerType(unsigned width);
-  FunctionType getFunctionType(ArrayRef<Type> inputs, ArrayRef<Type> results);
-  MemRefType getMemRefType(ArrayRef<int> shape, Type elementType,
-                           ArrayRef<AffineMap> affineMapComposition = {},
-                           unsigned memorySpace = 0);
-  VectorType getVectorType(ArrayRef<int> shape, Type elementType);
-  RankedTensorType getTensorType(ArrayRef<int> shape, Type elementType);
-  UnrankedTensorType getTensorType(Type elementType);
+  IntegerType getIntegerType(unsigned width, bool isSigned);
+  FunctionType getFunctionType(TypeRange inputs, TypeRange results);
+  TupleType getTupleType(TypeRange elementTypes);
+  NoneType getNoneType();
+
+  /// Get or construct an instance of the type `Ty` with provided arguments.
+  template <typename Ty, typename... Args>
+  Ty getType(Args &&...args) {
+    return Ty::get(context, std::forward<Args>(args)...);
+  }
+
+  /// Get or construct an instance of the attribute `Attr` with provided
+  /// arguments.
+  template <typename Attr, typename... Args>
+  Attr getAttr(Args &&...args) {
+    return Attr::get(context, std::forward<Args>(args)...);
+  }
 
   // Attributes.
+  NamedAttribute getNamedAttr(StringRef name, Attribute val);
 
+  UnitAttr getUnitAttr();
   BoolAttr getBoolAttr(bool value);
+  DictionaryAttr getDictionaryAttr(ArrayRef<NamedAttribute> value);
   IntegerAttr getIntegerAttr(Type type, int64_t value);
   IntegerAttr getIntegerAttr(Type type, const APInt &value);
   FloatAttr getFloatAttr(Type type, double value);
   FloatAttr getFloatAttr(Type type, const APFloat &value);
-  // Convenience methods that assumes fixed type.
-  // TODO(jpienaar): remove these.
-  IntegerAttr getIntegerAttr(int64_t value);
-  FloatAttr getFloatAttr(double value);
-  StringAttr getStringAttr(StringRef bytes);
+  StringAttr getStringAttr(const Twine &bytes);
   ArrayAttr getArrayAttr(ArrayRef<Attribute> value);
-  AffineMapAttr getAffineMapAttr(AffineMap map);
-  IntegerSetAttr getIntegerSetAttr(IntegerSet set);
-  TypeAttr getTypeAttr(Type type);
-  FunctionAttr getFunctionAttr(const Function *value);
-  ElementsAttr getSplatElementsAttr(VectorOrTensorType type, Attribute elt);
-  ElementsAttr getDenseElementsAttr(VectorOrTensorType type,
-                                    ArrayRef<char> data);
-  ElementsAttr getSparseElementsAttr(VectorOrTensorType type,
-                                     DenseIntElementsAttr indices,
-                                     DenseElementsAttr values);
-  ElementsAttr getOpaqueElementsAttr(VectorOrTensorType type, StringRef bytes);
+
+  // Returns a 0-valued attribute of the given `type`. This function only
+  // supports boolean, integer, and 16-/32-/64-bit float types, and vector or
+  // ranked tensor of them. Returns null attribute otherwise.
+  TypedAttr getZeroAttr(Type type);
+  // Returns a 1-valued attribute of the given `type`.
+  // Type constraints are the same as `getZeroAttr`.
+  TypedAttr getOneAttr(Type type);
+
+  // Convenience methods for fixed types.
+  FloatAttr getF16FloatAttr(float value);
+  FloatAttr getF32FloatAttr(float value);
+  FloatAttr getF64FloatAttr(double value);
+
+  IntegerAttr getI8IntegerAttr(int8_t value);
+  IntegerAttr getI16IntegerAttr(int16_t value);
+  IntegerAttr getI32IntegerAttr(int32_t value);
+  IntegerAttr getI64IntegerAttr(int64_t value);
+  IntegerAttr getIndexAttr(int64_t value);
+
+  /// Signed and unsigned integer attribute getters.
+  IntegerAttr getSI32IntegerAttr(int32_t value);
+  IntegerAttr getUI32IntegerAttr(uint32_t value);
+
+  /// Vector-typed DenseIntElementsAttr getters. `values` must not be empty.
+  DenseIntElementsAttr getBoolVectorAttr(ArrayRef<bool> values);
+  DenseIntElementsAttr getI32VectorAttr(ArrayRef<int32_t> values);
+  DenseIntElementsAttr getI64VectorAttr(ArrayRef<int64_t> values);
+  DenseIntElementsAttr getIndexVectorAttr(ArrayRef<int64_t> values);
+
+  DenseFPElementsAttr getF32VectorAttr(ArrayRef<float> values);
+  DenseFPElementsAttr getF64VectorAttr(ArrayRef<double> values);
+
+  /// Tensor-typed DenseIntElementsAttr getters. `values` can be empty.
+  /// These are generally preferable for representing general lists of integers
+  /// as attributes.
+  DenseIntElementsAttr getI32TensorAttr(ArrayRef<int32_t> values);
+  DenseIntElementsAttr getI64TensorAttr(ArrayRef<int64_t> values);
+  DenseIntElementsAttr getIndexTensorAttr(ArrayRef<int64_t> values);
+
+  /// Tensor-typed DenseArrayAttr getters.
+  DenseBoolArrayAttr getDenseBoolArrayAttr(ArrayRef<bool> values);
+  DenseI8ArrayAttr getDenseI8ArrayAttr(ArrayRef<int8_t> values);
+  DenseI16ArrayAttr getDenseI16ArrayAttr(ArrayRef<int16_t> values);
+  DenseI32ArrayAttr getDenseI32ArrayAttr(ArrayRef<int32_t> values);
+  DenseI64ArrayAttr getDenseI64ArrayAttr(ArrayRef<int64_t> values);
+  DenseF32ArrayAttr getDenseF32ArrayAttr(ArrayRef<float> values);
+  DenseF64ArrayAttr getDenseF64ArrayAttr(ArrayRef<double> values);
+
+  ArrayAttr getAffineMapArrayAttr(ArrayRef<AffineMap> values);
+  ArrayAttr getBoolArrayAttr(ArrayRef<bool> values);
+  ArrayAttr getI32ArrayAttr(ArrayRef<int32_t> values);
+  ArrayAttr getI64ArrayAttr(ArrayRef<int64_t> values);
+  ArrayAttr getIndexArrayAttr(ArrayRef<int64_t> values);
+  ArrayAttr getF32ArrayAttr(ArrayRef<float> values);
+  ArrayAttr getF64ArrayAttr(ArrayRef<double> values);
+  ArrayAttr getStrArrayAttr(ArrayRef<StringRef> values);
+  ArrayAttr getTypeArrayAttr(TypeRange values);
 
   // Affine expressions and affine maps.
   AffineExpr getAffineDimExpr(unsigned position);
   AffineExpr getAffineSymbolExpr(unsigned position);
   AffineExpr getAffineConstantExpr(int64_t constant);
 
-  AffineMap getAffineMap(unsigned dimCount, unsigned symbolCount,
-                         ArrayRef<AffineExpr> results,
-                         ArrayRef<AffineExpr> rangeSizes);
-
   // Special cases of affine maps and integer sets
+  /// Returns a zero result affine map with no dimensions or symbols: () -> ().
+  AffineMap getEmptyAffineMap();
   /// Returns a single constant result affine map with 0 dimensions and 0
   /// symbols.  One constant result: () -> (val).
   AffineMap getConstantAffineMap(int64_t val);
@@ -149,177 +196,204 @@ public:
   ///   returns:    (d0, d1)[s0] -> (d0 + 2, d1 + s0 + 2)
   AffineMap getShiftedAffineMap(AffineMap map, int64_t shift);
 
-  // Integer set.
-  IntegerSet getIntegerSet(unsigned dimCount, unsigned symbolCount,
-                           ArrayRef<AffineExpr> constraints,
-                           ArrayRef<bool> isEq);
-  // TODO: Helpers for affine map/exprs, etc.
 protected:
   MLIRContext *context;
 };
 
-/// This class helps build a CFGFunction.  Instructions that are created are
-/// automatically inserted at an insertion point or added to the current basic
-/// block.
-class CFGFuncBuilder : public Builder {
+/// This class helps build Operations. Operations that are created are
+/// automatically inserted at an insertion point. The builder is copyable.
+class OpBuilder : public Builder {
 public:
-  CFGFuncBuilder(BasicBlock *block, BasicBlock::iterator insertPoint)
-      : Builder(block->getFunction()->getContext()),
-        function(block->getFunction()) {
+  class InsertPoint;
+  struct Listener;
+
+  /// Create a builder with the given context.
+  explicit OpBuilder(MLIRContext *ctx, Listener *listener = nullptr)
+      : Builder(ctx), listener(listener) {}
+
+  /// Create a builder and set the insertion point to the start of the region.
+  explicit OpBuilder(Region *region, Listener *listener = nullptr)
+      : OpBuilder(region->getContext(), listener) {
+    if (!region->empty())
+      setInsertionPointToStart(&region->front());
+  }
+  explicit OpBuilder(Region &region, Listener *listener = nullptr)
+      : OpBuilder(&region, listener) {}
+
+  /// Create a builder and set insertion point to the given operation, which
+  /// will cause subsequent insertions to go right before it.
+  explicit OpBuilder(Operation *op, Listener *listener = nullptr)
+      : OpBuilder(op->getContext(), listener) {
+    setInsertionPoint(op);
+  }
+
+  OpBuilder(Block *block, Block::iterator insertPoint,
+            Listener *listener = nullptr)
+      : OpBuilder(block->getParent()->getContext(), listener) {
     setInsertionPoint(block, insertPoint);
   }
 
-  CFGFuncBuilder(Instruction *insertBefore)
-      : CFGFuncBuilder(insertBefore->getBlock(),
-                       BasicBlock::iterator(insertBefore)) {}
-
-  CFGFuncBuilder(BasicBlock *block)
-      : Builder(block->getFunction()->getContext()),
-        function(block->getFunction()) {
-    setInsertionPoint(block);
+  /// Create a builder and set the insertion point to before the first operation
+  /// in the block but still inside the block.
+  static OpBuilder atBlockBegin(Block *block, Listener *listener = nullptr) {
+    return OpBuilder(block, block->begin(), listener);
   }
 
-  CFGFuncBuilder(CFGFunction *function)
-      : Builder(function->getContext()), function(function) {}
-
-  /// Return the function this builder is referring to.
-  CFGFunction *getFunction() const { return function; }
-
-  /// Reset the insertion point to no location.  Creating an operation without a
-  /// set insertion point is an error, but this can still be useful when the
-  /// current insertion point a builder refers to is being removed.
-  void clearInsertionPoint() {
-    this->block = nullptr;
-    insertPoint = BasicBlock::iterator();
+  /// Create a builder and set the insertion point to after the last operation
+  /// in the block but still inside the block.
+  static OpBuilder atBlockEnd(Block *block, Listener *listener = nullptr) {
+    return OpBuilder(block, block->end(), listener);
   }
 
-  /// Return the block the current insertion point belongs to.  Note that the
-  /// the insertion point is not necessarily the end of the block.
-  BasicBlock *getInsertionBlock() const { return block; }
-
-  /// Return the insert position as the BasicBlock iterator.  The block itself
-  /// can be obtained by calling getInsertionBlock.
-  BasicBlock::iterator getInsertionPoint() const { return insertPoint; }
-
-  /// Set the insertion point to the specified location.
-  void setInsertionPoint(BasicBlock *block, BasicBlock::iterator insertPoint) {
-    assert(block->getFunction() == function &&
-           "can't move to a different function");
-    this->block = block;
-    this->insertPoint = insertPoint;
+  /// Create a builder and set the insertion point to before the block
+  /// terminator.
+  static OpBuilder atBlockTerminator(Block *block,
+                                     Listener *listener = nullptr) {
+    auto *terminator = block->getTerminator();
+    assert(terminator != nullptr && "the block has no terminator");
+    return OpBuilder(block, Block::iterator(terminator), listener);
   }
 
-  /// Set the insertion point to the specified operation.
-  void setInsertionPoint(Instruction *inst) {
-    setInsertionPoint(inst->getBlock(), BasicBlock::iterator(inst));
-  }
+  //===--------------------------------------------------------------------===//
+  // Listeners
+  //===--------------------------------------------------------------------===//
 
-  /// Set the insertion point to the end of the specified block.
-  void setInsertionPoint(BasicBlock *block) {
-    setInsertionPoint(block, block->end());
-  }
+  /// Base class for listeners.
+  struct ListenerBase {
+    /// The kind of listener.
+    enum class Kind {
+      /// OpBuilder::Listener or user-derived class.
+      OpBuilderListener = 0,
 
-  void insert(Instruction *opInst) {
-    block->getOperations().insert(insertPoint, opInst);
-  }
+      /// RewriterBase::Listener or user-derived class.
+      RewriterBaseListener = 1
+    };
 
-  /// Add new basic block and set the insertion point to the end of it.  If an
-  /// 'insertBefore' basic block is passed, the block will be placed before the
-  /// specified block.  If not, the block will be appended to the end of the
-  /// current function.
-  BasicBlock *createBlock(BasicBlock *insertBefore = nullptr);
+    Kind getKind() const { return kind; }
 
-  /// Create an operation given the fields represented as an OperationState.
-  Instruction *createOperation(const OperationState &state);
+  protected:
+    ListenerBase(Kind kind) : kind(kind) {}
 
-  /// Create operation of specific op type at the current insertion point
-  /// without verifying to see if it is valid.
-  template <typename OpTy, typename... Args>
-  OpPointer<OpTy> create(Location location, Args... args) {
-    OperationState state(getContext(), location, OpTy::getOperationName());
-    OpTy::build(this, &state, args...);
-    auto *inst = createOperation(state);
-    auto result = inst->dyn_cast<OpTy>();
-    assert(result && "Builder didn't return the right type");
-    return result;
-  }
+  private:
+    const Kind kind;
+  };
 
-  /// Creates an operation of specific op type at the current insertion point.
-  /// If the result is an invalid op (the verifier hook fails), emit an error
-  /// and return null.
-  template <typename OpTy, typename... Args>
-  OpPointer<OpTy> createChecked(Location location, Args... args) {
-    OperationState state(getContext(), location, OpTy::getOperationName());
-    OpTy::build(this, &state, args...);
-    auto *inst = createOperation(state);
+  /// This class represents a listener that may be used to hook into various
+  /// actions within an OpBuilder.
+  struct Listener : public ListenerBase {
+    Listener() : ListenerBase(ListenerBase::Kind::OpBuilderListener) {}
 
-    // If the Instruction we produce is valid, return it.
-    if (!OpTy::verifyInvariants(inst)) {
-      auto result = inst->dyn_cast<OpTy>();
-      assert(result && "Builder didn't return the right type");
-      return result;
+    virtual ~Listener() = default;
+
+    /// Notify the listener that the specified operation was inserted.
+    ///
+    /// * If the operation was moved, then `previous` is the previous location
+    ///   of the op.
+    /// * If the operation was unlinked before it was inserted, then `previous`
+    ///   is empty.
+    ///
+    /// Note: Creating an (unlinked) op does not trigger this notification.
+    virtual void notifyOperationInserted(Operation *op, InsertPoint previous) {}
+
+    /// Notify the listener that the specified block was inserted.
+    ///
+    /// * If the block was moved, then `previous` and `previousIt` are the
+    ///   previous location of the block.
+    /// * If the block was unlinked before it was inserted, then `previous`
+    ///   is "nullptr".
+    ///
+    /// Note: Creating an (unlinked) block does not trigger this notification.
+    virtual void notifyBlockInserted(Block *block, Region *previous,
+                                     Region::iterator previousIt) {}
+
+  protected:
+    Listener(Kind kind) : ListenerBase(kind) {}
+  };
+
+  /// Sets the listener of this builder to the one provided.
+  void setListener(Listener *newListener) { listener = newListener; }
+
+  /// Returns the current listener of this builder, or nullptr if this builder
+  /// doesn't have a listener.
+  Listener *getListener() const { return listener; }
+
+  //===--------------------------------------------------------------------===//
+  // Insertion Point Management
+  //===--------------------------------------------------------------------===//
+
+  /// This class represents a saved insertion point.
+  class InsertPoint {
+  public:
+    /// Creates a new insertion point which doesn't point to anything.
+    InsertPoint() = default;
+
+    /// Creates a new insertion point at the given location.
+    InsertPoint(Block *insertBlock, Block::iterator insertPt)
+        : block(insertBlock), point(insertPt) {}
+
+    /// Returns true if this insert point is set.
+    bool isSet() const { return (block != nullptr); }
+
+    Block *getBlock() const { return block; }
+    Block::iterator getPoint() const { return point; }
+
+  private:
+    Block *block = nullptr;
+    Block::iterator point;
+  };
+
+  /// RAII guard to reset the insertion point of the builder when destroyed.
+  class InsertionGuard {
+  public:
+    InsertionGuard(OpBuilder &builder)
+        : builder(&builder), ip(builder.saveInsertionPoint()) {}
+
+    ~InsertionGuard() {
+      if (builder)
+        builder->restoreInsertionPoint(ip);
     }
 
-    // Otherwise, the error message got emitted.  Just remove the instruction
-    // we made.
-    inst->erase();
-    return OpPointer<OpTy>();
-  }
+    InsertionGuard(const InsertionGuard &) = delete;
+    InsertionGuard &operator=(const InsertionGuard &) = delete;
 
-  Instruction *cloneOperation(const Instruction &srcOpInst) {
-    auto *op = srcOpInst.clone();
-    insert(op);
-    return op;
-  }
+    /// Implement the move constructor to clear the builder field of `other`.
+    /// That way it does not restore the insertion point upon destruction as
+    /// that should be done exclusively by the just constructed InsertionGuard.
+    InsertionGuard(InsertionGuard &&other) noexcept
+        : builder(other.builder), ip(other.ip) {
+      other.builder = nullptr;
+    }
 
-private:
-  CFGFunction *function;
-  BasicBlock *block = nullptr;
-  BasicBlock::iterator insertPoint;
-};
+    InsertionGuard &operator=(InsertionGuard &&other) = delete;
 
-/// This class helps build an MLFunction.  Statements that are created are
-/// automatically inserted at an insertion point or added to the current
-/// statement block. The builder has only two member variables and can be passed
-/// around by value.
-class MLFuncBuilder : public Builder {
-public:
-  /// Create ML function builder and set insertion point to the given statement,
-  /// which will cause subsequent insertions to go right before it.
-  MLFuncBuilder(Statement *stmt)
-      // TODO: Eliminate findFunction from this.
-      : MLFuncBuilder(stmt->findFunction()) {
-    setInsertionPoint(stmt);
-  }
-
-  MLFuncBuilder(StmtBlock *block, StmtBlock::iterator insertPoint)
-      // TODO: Eliminate findFunction from this.
-      : MLFuncBuilder(block->findFunction()) {
-    setInsertionPoint(block, insertPoint);
-  }
-
-  /// Create an ML function builder and set the insertion point to the start of
-  /// the function.
-  MLFuncBuilder(MLFunction *func)
-      : Builder(func->getContext()), function(func) {
-    setInsertionPoint(func, func->begin());
-  }
-
-  /// Return the function this builder is referring to.
-  MLFunction *getFunction() const { return function; }
+  private:
+    OpBuilder *builder;
+    OpBuilder::InsertPoint ip;
+  };
 
   /// Reset the insertion point to no location.  Creating an operation without a
   /// set insertion point is an error, but this can still be useful when the
   /// current insertion point a builder refers to is being removed.
   void clearInsertionPoint() {
     this->block = nullptr;
-    insertPoint = StmtBlock::iterator();
+    insertPoint = Block::iterator();
+  }
+
+  /// Return a saved insertion point.
+  InsertPoint saveInsertionPoint() const {
+    return InsertPoint(getInsertionBlock(), getInsertionPoint());
+  }
+
+  /// Restore the insert point to a previously saved point.
+  void restoreInsertionPoint(InsertPoint ip) {
+    if (ip.isSet())
+      setInsertionPoint(ip.getBlock(), ip.getPoint());
+    else
+      clearInsertionPoint();
   }
 
   /// Set the insertion point to the specified location.
-  /// Unlike CFGFuncBuilder, MLFuncBuilder allows to set insertion
-  /// point to a different function.
-  void setInsertionPoint(StmtBlock *block, StmtBlock::iterator insertPoint) {
+  void setInsertionPoint(Block *block, Block::iterator insertPoint) {
     // TODO: check that insertPoint is in this rather than some other block.
     this->block = block;
     this->insertPoint = insertPoint;
@@ -327,177 +401,308 @@ public:
 
   /// Sets the insertion point to the specified operation, which will cause
   /// subsequent insertions to go right before it.
-  void setInsertionPoint(Statement *stmt) {
-    setInsertionPoint(stmt->getBlock(), StmtBlock::iterator(stmt));
+  void setInsertionPoint(Operation *op) {
+    setInsertionPoint(op->getBlock(), Block::iterator(op));
+  }
+
+  /// Sets the insertion point to the node after the specified operation, which
+  /// will cause subsequent insertions to go right after it.
+  void setInsertionPointAfter(Operation *op) {
+    setInsertionPoint(op->getBlock(), ++Block::iterator(op));
+  }
+
+  /// Sets the insertion point to the node after the specified value. If value
+  /// has a defining operation, sets the insertion point to the node after such
+  /// defining operation. This will cause subsequent insertions to go right
+  /// after it. Otherwise, value is a BlockArgument. Sets the insertion point to
+  /// the start of its block.
+  void setInsertionPointAfterValue(Value val) {
+    if (Operation *op = val.getDefiningOp()) {
+      setInsertionPointAfter(op);
+    } else {
+      auto blockArg = llvm::cast<BlockArgument>(val);
+      setInsertionPointToStart(blockArg.getOwner());
+    }
   }
 
   /// Sets the insertion point to the start of the specified block.
-  void setInsertionPointToStart(StmtBlock *block) {
+  void setInsertionPointToStart(Block *block) {
     setInsertionPoint(block, block->begin());
   }
 
   /// Sets the insertion point to the end of the specified block.
-  void setInsertionPointToEnd(StmtBlock *block) {
+  void setInsertionPointToEnd(Block *block) {
     setInsertionPoint(block, block->end());
   }
 
-  /// Returns a builder for the body of a for Stmt.
-  static MLFuncBuilder getForStmtBodyBuilder(ForStmt *forStmt) {
-    return MLFuncBuilder(forStmt, forStmt->end());
-  }
+  /// Return the block the current insertion point belongs to.  Note that the
+  /// insertion point is not necessarily the end of the block.
+  Block *getInsertionBlock() const { return block; }
 
   /// Returns the current insertion point of the builder.
-  StmtBlock::iterator getInsertionPoint() const { return insertPoint; }
+  Block::iterator getInsertionPoint() const { return insertPoint; }
 
   /// Returns the current block of the builder.
-  StmtBlock *getBlock() const { return block; }
+  Block *getBlock() const { return block; }
+
+  //===--------------------------------------------------------------------===//
+  // Block Creation
+  //===--------------------------------------------------------------------===//
+
+  /// Add new block with 'argTypes' arguments and set the insertion point to the
+  /// end of it. The block is inserted at the provided insertion point of
+  /// 'parent'. `locs` contains the locations of the inserted arguments, and
+  /// should match the size of `argTypes`.
+  Block *createBlock(Region *parent, Region::iterator insertPt = {},
+                     TypeRange argTypes = {}, ArrayRef<Location> locs = {});
+
+  /// Add new block with 'argTypes' arguments and set the insertion point to the
+  /// end of it. The block is placed before 'insertBefore'. `locs` contains the
+  /// locations of the inserted arguments, and should match the size of
+  /// `argTypes`.
+  Block *createBlock(Block *insertBefore, TypeRange argTypes = {},
+                     ArrayRef<Location> locs = {});
+
+  //===--------------------------------------------------------------------===//
+  // Operation Creation
+  //===--------------------------------------------------------------------===//
+
+  /// Insert the given operation at the current insertion point and return it.
+  Operation *insert(Operation *op);
 
   /// Creates an operation given the fields represented as an OperationState.
-  OperationStmt *createOperation(const OperationState &state);
+  Operation *create(const OperationState &state);
 
-  /// Creates an operation given the fields.
-  OperationStmt *createOperation(Location location, OperationName name,
-                                 ArrayRef<MLValue *> operands,
-                                 ArrayRef<Type> types,
-                                 ArrayRef<NamedAttribute> attrs);
+  /// Creates an operation with the given fields.
+  Operation *create(Location loc, StringAttr opName, ValueRange operands,
+                    TypeRange types = {},
+                    ArrayRef<NamedAttribute> attributes = {},
+                    BlockRange successors = {},
+                    MutableArrayRef<std::unique_ptr<Region>> regions = {});
 
-  /// Create operation of specific op type at the current insertion point.
+private:
+  /// Helper for sanity checking preconditions for create* methods below.
+  template <typename OpT>
+  RegisteredOperationName getCheckRegisteredInfo(MLIRContext *ctx) {
+    std::optional<RegisteredOperationName> opName =
+        RegisteredOperationName::lookup(TypeID::get<OpT>(), ctx);
+    if (LLVM_UNLIKELY(!opName)) {
+      llvm::report_fatal_error(
+          "Building op `" + OpT::getOperationName() +
+          "` but it isn't known in this MLIRContext: the dialect may not "
+          "be loaded or this operation hasn't been added by the dialect. See "
+          "also https://mlir.llvm.org/getting_started/Faq/"
+          "#registered-loaded-dependent-whats-up-with-dialects-management");
+    }
+    return *opName;
+  }
+
+public:
+  /// Create an operation of specific op type at the current insertion point.
   template <typename OpTy, typename... Args>
-  OpPointer<OpTy> create(Location location, Args... args) {
-    OperationState state(getContext(), location, OpTy::getOperationName());
-    OpTy::build(this, &state, args...);
-    auto *stmt = createOperation(state);
-    auto result = stmt->dyn_cast<OpTy>();
-    assert(result && "Builder didn't return the right type");
+  OpTy create(Location location, Args &&...args) {
+    OperationState state(location,
+                         getCheckRegisteredInfo<OpTy>(location.getContext()));
+    OpTy::build(*this, state, std::forward<Args>(args)...);
+    auto *op = create(state);
+    auto result = dyn_cast<OpTy>(op);
+    assert(result && "builder didn't return the right type");
     return result;
   }
 
-  /// Creates an operation of specific op type at the current insertion point.
-  /// If the result is an invalid op (the verifier hook fails), emit an error
-  /// and return null.
+  /// Create an operation of specific op type at the current insertion point,
+  /// and immediately try to fold it. This functions populates 'results' with
+  /// the results of the operation.
   template <typename OpTy, typename... Args>
-  OpPointer<OpTy> createChecked(Location location, Args... args) {
-    OperationState state(getContext(), location, OpTy::getOperationName());
-    OpTy::build(this, &state, args...);
-    auto *stmt = createOperation(state);
+  void createOrFold(SmallVectorImpl<Value> &results, Location location,
+                    Args &&...args) {
+    // Create the operation without using 'create' as we want to control when
+    // the listener is notified.
+    OperationState state(location,
+                         getCheckRegisteredInfo<OpTy>(location.getContext()));
+    OpTy::build(*this, state, std::forward<Args>(args)...);
+    Operation *op = Operation::create(state);
+    if (block)
+      block->getOperations().insert(insertPoint, op);
 
-    // If the OperationStmt we produce is valid, return it.
-    if (!OpTy::verifyInvariants(stmt)) {
-      auto result = stmt->dyn_cast<OpTy>();
-      assert(result && "Builder didn't return the right type");
-      return result;
+    // Attempt to fold the operation.
+    if (succeeded(tryFold(op, results)) && !results.empty()) {
+      // Erase the operation, if the fold removed the need for this operation.
+      // Note: The fold already populated the results in this case.
+      op->erase();
+      return;
     }
 
-    // Otherwise, the error message got emitted.  Just remove the statement
-    // we made.
-    stmt->erase();
-    return OpPointer<OpTy>();
+    ResultRange opResults = op->getResults();
+    results.assign(opResults.begin(), opResults.end());
+    if (block && listener)
+      listener->notifyOperationInserted(op, /*previous=*/{});
   }
 
-  /// Creates a deep copy of the specified statement, remapping any operands
-  /// that use values outside of the statement using the map that is provided (
-  /// leaving them alone if no entry is present).  Replaces references to cloned
-  /// sub-statements to the corresponding statement that is copied, and adds
-  /// those mappings to the map.
-  Statement *clone(const Statement &stmt,
-                   OperationStmt::OperandMapTy &operandMapping) {
-    Statement *cloneStmt = stmt.clone(operandMapping, getContext());
-    block->getStatements().insert(insertPoint, cloneStmt);
-    return cloneStmt;
+  /// Overload to create or fold a single result operation.
+  template <typename OpTy, typename... Args>
+  std::enable_if_t<OpTy::template hasTrait<OpTrait::OneResult>(), Value>
+  createOrFold(Location location, Args &&...args) {
+    SmallVector<Value, 1> results;
+    createOrFold<OpTy>(results, location, std::forward<Args>(args)...);
+    return results.front();
   }
 
-  // Creates a for statement. When step is not specified, it is set to 1.
-  ForStmt *createFor(Location location, ArrayRef<MLValue *> lbOperands,
-                     AffineMap lbMap, ArrayRef<MLValue *> ubOperands,
-                     AffineMap ubMap, int64_t step = 1);
+  /// Overload to create or fold a zero result operation.
+  template <typename OpTy, typename... Args>
+  std::enable_if_t<OpTy::template hasTrait<OpTrait::ZeroResults>(), OpTy>
+  createOrFold(Location location, Args &&...args) {
+    auto op = create<OpTy>(location, std::forward<Args>(args)...);
+    SmallVector<Value, 0> unused;
+    (void)tryFold(op.getOperation(), unused);
 
-  // Creates a for statement with known (constant) lower and upper bounds.
-  // Default step is 1.
-  ForStmt *createFor(Location loc, int64_t lb, int64_t ub, int64_t step = 1);
+    // Folding cannot remove a zero-result operation, so for convenience we
+    // continue to return it.
+    return op;
+  }
 
-  /// Creates if statement.
-  IfStmt *createIf(Location location, ArrayRef<MLValue *> operands,
-                   IntegerSet set);
+  /// Attempts to fold the given operation and places new results within
+  /// `results`. Returns success if the operation was folded, failure otherwise.
+  /// If the fold was in-place, `results` will not be filled. Optionally, newly
+  /// materialized constant operations can be returned to the caller.
+  ///
+  /// Note: This function does not erase the operation on a successful fold.
+  LogicalResult
+  tryFold(Operation *op, SmallVectorImpl<Value> &results,
+          SmallVectorImpl<Operation *> *materializedConstants = nullptr);
+
+  /// Creates a deep copy of the specified operation, remapping any operands
+  /// that use values outside of the operation using the map that is provided
+  /// ( leaving them alone if no entry is present).  Replaces references to
+  /// cloned sub-operations to the corresponding operation that is copied,
+  /// and adds those mappings to the map.
+  Operation *clone(Operation &op, IRMapping &mapper);
+  Operation *clone(Operation &op);
+
+  /// Creates a deep copy of this operation but keep the operation regions
+  /// empty. Operands are remapped using `mapper` (if present), and `mapper` is
+  /// updated to contain the results.
+  Operation *cloneWithoutRegions(Operation &op, IRMapping &mapper) {
+    return insert(op.cloneWithoutRegions(mapper));
+  }
+  Operation *cloneWithoutRegions(Operation &op) {
+    return insert(op.cloneWithoutRegions());
+  }
+  template <typename OpT>
+  OpT cloneWithoutRegions(OpT op) {
+    return cast<OpT>(cloneWithoutRegions(*op.getOperation()));
+  }
+
+  /// Clone the blocks that belong to "region" before the given position in
+  /// another region "parent". The two regions must be different. The caller is
+  /// responsible for creating or updating the operation transferring flow of
+  /// control to the region and passing it the correct block arguments.
+  void cloneRegionBefore(Region &region, Region &parent,
+                         Region::iterator before, IRMapping &mapping);
+  void cloneRegionBefore(Region &region, Region &parent,
+                         Region::iterator before);
+  void cloneRegionBefore(Region &region, Block *before);
+
+protected:
+  /// The optional listener for events of this builder.
+  Listener *listener;
 
 private:
-  MLFunction *function;
-  StmtBlock *block = nullptr;
-  StmtBlock::iterator insertPoint;
+  /// The current block this builder is inserting into.
+  Block *block = nullptr;
+  /// The insertion point within the block that this builder is inserting
+  /// before.
+  Block::iterator insertPoint;
 };
 
-// Wrapper around common CFGFuncBuilder and MLFuncBuilder functionality. Use
-// this wrapper for interfaces where operations need to be created in either a
-// CFG function or ML function.
-class FuncBuilder : public Builder {
+/// ImplicitLocOpBuilder maintains a 'current location', allowing use of the
+/// create<> method without specifying the location.  It is otherwise the same
+/// as OpBuilder.
+class ImplicitLocOpBuilder : public mlir::OpBuilder {
 public:
-  FuncBuilder(CFGFuncBuilder &cfgFuncBuilder)
-      : Builder(cfgFuncBuilder.getContext()), builder(cfgFuncBuilder),
-        kind(Function::Kind::CFGFunc) {}
-  FuncBuilder(MLFuncBuilder &mlFuncBuilder)
-      : Builder(mlFuncBuilder.getContext()), builder(mlFuncBuilder),
-        kind(Function::Kind::MLFunc) {}
-  FuncBuilder(Operation *op) : Builder(op->getContext()) {
-    if (auto *inst = dyn_cast<Instruction>(op)) {
-      builder = builderUnion(inst);
-      kind = Function::Kind::CFGFunc;
-    } else {
-      builder = builderUnion(cast<OperationStmt>(op));
-      kind = Function::Kind::MLFunc;
-    }
+  /// OpBuilder has a bunch of convenience constructors - we support them all
+  /// with the additional Location.
+  template <typename... T>
+  ImplicitLocOpBuilder(Location loc, T &&...operands)
+      : OpBuilder(std::forward<T>(operands)...), curLoc(loc) {}
+
+  /// Create a builder and set the insertion point to before the first operation
+  /// in the block but still inside the block.
+  static ImplicitLocOpBuilder atBlockBegin(Location loc, Block *block,
+                                           Listener *listener = nullptr) {
+    return ImplicitLocOpBuilder(loc, block, block->begin(), listener);
   }
 
-  /// Creates an operation given the fields represented as an OperationState.
-  Operation *createOperation(const OperationState &state) {
-    if (kind == Function::Kind::CFGFunc)
-      return builder.cfg.createOperation(state);
-    return builder.ml.createOperation(state);
+  /// Create a builder and set the insertion point to after the last operation
+  /// in the block but still inside the block.
+  static ImplicitLocOpBuilder atBlockEnd(Location loc, Block *block,
+                                         Listener *listener = nullptr) {
+    return ImplicitLocOpBuilder(loc, block, block->end(), listener);
   }
 
-  /// Creates operation of specific op type at the current insertion point
-  /// without verifying to see if it is valid.
+  /// Create a builder and set the insertion point to before the block
+  /// terminator.
+  static ImplicitLocOpBuilder atBlockTerminator(Location loc, Block *block,
+                                                Listener *listener = nullptr) {
+    auto *terminator = block->getTerminator();
+    assert(terminator != nullptr && "the block has no terminator");
+    return ImplicitLocOpBuilder(loc, block, Block::iterator(terminator),
+                                listener);
+  }
+
+  /// Accessors for the implied location.
+  Location getLoc() const { return curLoc; }
+  void setLoc(Location loc) { curLoc = loc; }
+
+  // We allow clients to use the explicit-loc version of create as well.
+  using OpBuilder::create;
+  using OpBuilder::createOrFold;
+
+  /// Create an operation of specific op type at the current insertion point and
+  /// location.
   template <typename OpTy, typename... Args>
-  OpPointer<OpTy> create(Location location, Args... args) {
-    if (kind == Function::Kind::CFGFunc)
-      return builder.cfg.create<OpTy, Args...>(location, args...);
-    return builder.ml.create<OpTy, Args...>(location, args...);
+  OpTy create(Args &&...args) {
+    return OpBuilder::create<OpTy>(curLoc, std::forward<Args>(args)...);
   }
 
-  /// Creates an operation of specific op type at the current insertion point.
-  /// If the result is an invalid op (the verifier hook fails), emit an error
-  /// and return null.
+  /// Create an operation of specific op type at the current insertion point,
+  /// and immediately try to fold it. This functions populates 'results' with
+  /// the results after folding the operation.
   template <typename OpTy, typename... Args>
-  OpPointer<OpTy> createChecked(Location location, Args... args) {
-    if (kind == Function::Kind::CFGFunc)
-      return builder.cfg.createChecked<OpTy, Args...>(location, args...);
-    return builder.ml.createChecked<OpTy, Args...>(location, args...);
+  void createOrFold(llvm::SmallVectorImpl<Value> &results, Args &&...args) {
+    OpBuilder::createOrFold<OpTy>(results, curLoc, std::forward<Args>(args)...);
   }
 
-  /// Set the insertion point to the specified operation. This requires that the
-  /// input operation is a Instruction when building a CFG function and a
-  /// OperationStmt when building a ML function.
-  void setInsertionPoint(Operation *op) {
-    if (kind == Function::Kind::CFGFunc)
-      builder.cfg.setInsertionPoint(cast<Instruction>(op));
-    else
-      builder.ml.setInsertionPoint(cast<OperationStmt>(op));
+  /// Overload to create or fold a single result operation.
+  template <typename OpTy, typename... Args>
+  std::enable_if_t<OpTy::template hasTrait<mlir::OpTrait::OneResult>(), Value>
+  createOrFold(Args &&...args) {
+    return OpBuilder::createOrFold<OpTy>(curLoc, std::forward<Args>(args)...);
+  }
+
+  /// Overload to create or fold a zero result operation.
+  template <typename OpTy, typename... Args>
+  std::enable_if_t<OpTy::template hasTrait<mlir::OpTrait::ZeroResults>(), OpTy>
+  createOrFold(Args &&...args) {
+    return OpBuilder::createOrFold<OpTy>(curLoc, std::forward<Args>(args)...);
+  }
+
+  /// This builder can also be used to emit diagnostics to the current location.
+  mlir::InFlightDiagnostic
+  emitError(const llvm::Twine &message = llvm::Twine()) {
+    return mlir::emitError(curLoc, message);
+  }
+  mlir::InFlightDiagnostic
+  emitWarning(const llvm::Twine &message = llvm::Twine()) {
+    return mlir::emitWarning(curLoc, message);
+  }
+  mlir::InFlightDiagnostic
+  emitRemark(const llvm::Twine &message = llvm::Twine()) {
+    return mlir::emitRemark(curLoc, message);
   }
 
 private:
-  // Wrapped builders for CFG and ML functions.
-  union builderUnion {
-    builderUnion(CFGFuncBuilder cfg) : cfg(cfg) {}
-    builderUnion(MLFuncBuilder ml) : ml(ml) {}
-    builderUnion(Instruction *op) : cfg(op) {}
-    builderUnion(OperationStmt *op) : ml(op) {}
-    // Default initializer to allow deferring initialization of member.
-    builderUnion() {}
-
-    CFGFuncBuilder cfg;
-    MLFuncBuilder ml;
-  } builder;
-
-  // The type of builder in the builderUnion.
-  Function::Kind kind;
+  Location curLoc;
 };
 
 } // namespace mlir

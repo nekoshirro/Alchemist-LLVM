@@ -1,194 +1,104 @@
-// RUN: mlir-opt %s -split-input-file -verify
+// RUN: mlir-opt -allow-unregistered-dialect %s -split-input-file -verify-diagnostics
 
 // Check different error cases.
-// -----
 
-extfunc @illegaltype(i) // expected-error {{expected type}}
-
-// -----
-
-mlfunc @illegaltype() {
-  %0 = constant splat<<vector 4 x f32>, 0> : vector<4 x f32> // expected-error {{expected type}}
+func.func @bad_branch() {
+^bb12:
+  cf.br ^missing  // expected-error {{reference to an undefined block}}
 }
 
 // -----
 
-extfunc @nestedtensor(tensor<tensor<i8>>) -> () // expected-error {{invalid tensor element type}}
-
-// -----
-// Test no map in memref type.
-extfunc @memrefs(memref<2x4xi8, >) // expected-error {{expected list element}}
-
-// -----
-// Test non-existent map in memref type.
-extfunc @memrefs(memref<2x4xi8, #map7>) // expected-error {{undefined affine map id 'map7'}}
-
-// -----
-// Test non hash identifier in memref type.
-extfunc @memrefs(memref<2x4xi8, %map7>) // expected-error {{expected '(' at start of dimensional identifiers list}}
-
-// -----
-// Test non-existent map in map composition of memref type.
-#map0 = (d0, d1) -> (d0, d1)
-
-extfunc @memrefs(memref<2x4xi8, #map0, #map8>) // expected-error {{undefined affine map id 'map8'}}
-
-// -----
-// Test multiple memory space error.
-#map0 = (d0, d1) -> (d0, d1)
-extfunc @memrefs(memref<2x4xi8, #map0, 1, 2>) // expected-error {{multiple memory spaces specified in memref type}}
-
-// -----
-// Test affine map after memory space.
-#map0 = (d0, d1) -> (d0, d1)
-#map1 = (d0, d1) -> (d0, d1)
-
-extfunc @memrefs(memref<2x4xi8, #map0, 1, #map1>) // expected-error {{affine map after memory space in memref type}}
-
-// -----
-// Test dimension mismatch between memref and layout map.
-// The error must be emitted even for the trivial identity layout maps that are
-// dropped in type creation.
-#map0 = (d0, d1) -> (d0, d1)
-extfunc @memrefs(memref<42xi8, #map0>) // expected-error {{memref affine map dimension mismatch}}
-
-// -----
-
-#map0 = (d0, d1) -> (d0, d1)
-#map1 = (d0) -> (d0)
-extfunc @memrefs(memref<42x42xi8, #map0, #map1>) // expected-error {{memref affine map dimension mismatch}}
-
-// -----
-
-extfunc @illegalattrs() -> () attributes { key } // expected-error {{expected ':' in attribute list}}
-
-// -----
-
-cfgfunc @foo()
-cfgfunc @bar() // expected-error {{expected '{' in CFG function}}
-
-// -----
-
-extfunc missingsigil() -> (i1, index, f32) // expected-error {{expected a function identifier like}}
-
-
-// -----
-
-cfgfunc @bad_branch() {
-bb12:
-  br missing  // expected-error {{reference to an undefined basic block}}
-}
-
-// -----
-
-cfgfunc @block_redef() {
-bb42:
+func.func @block_redef() {
+^bb42:
   return
-bb42:        // expected-error {{redefinition of block 'bb42'}}
+^bb42:        // expected-error {{redefinition of block '^bb42'}}
   return
 }
 
 // -----
 
-cfgfunc @no_terminator() {
-bb40:
+func.func @no_terminator() {   // expected-error {{empty block: expect at least a terminator}}
+^bb40:
   return
-bb41:
-bb42:        // expected-error {{custom op 'bb42' is unknown}}
-  return
-}
-
-// -----
-
-cfgfunc @block_no_rparen() {
-bb42 (%bb42 : i32: // expected-error {{expected ')' to end argument list}}
+^bb41:
+^bb42:
   return
 }
 
 // -----
 
-cfgfunc @block_arg_no_ssaid() {
-bb42 (i32): // expected-error {{expected SSA operand}}
+func.func @block_no_rparen() {
+^bb42 (%bb42 : i32: // expected-error {{expected ')'}}
   return
 }
 
 // -----
 
-cfgfunc @block_arg_no_type() {
-bb42 (%0): // expected-error {{expected ':' and type for SSA operand}}
+func.func @block_arg_no_ssaid() {
+^bb42 (i32): // expected-error {{expected SSA operand}}
   return
 }
 
 // -----
 
-cfgfunc @block_arg_no_close_paren() {
-bb42:
-  br bb2( // expected-error@+1 {{expected ')' to close argument list}}
+func.func @block_arg_no_type() {
+^bb42 (%0): // expected-error {{expected ':' and type for SSA operand}}
   return
 }
 
 // -----
 
-cfgfunc @block_first_has_predecessor() {
-// expected-error@-1 {{first block of cfgfunc must not have predecessors}}
-bb42:
-  br bb43
-bb43:
-  br bb42
-}
-
-// -----
-
-cfgfunc @illegalattrs() -> ()
-  attributes { key } { // expected-error {{expected ':' in attribute list}}
-bb42:
+func.func @block_arg_no_close_paren() {
+^bb42:
+  cf.br ^bb2( // expected-error {{expected ':'}}
   return
 }
 
 // -----
 
-mlfunc @foo()
-mlfunc @bar() // expected-error {{expected '{' before statement list}}
-
-// -----
-
-mlfunc @empty() { // expected-error {{ML function must end with return statement}}
+func.func @block_first_has_predecessor() {
+// expected-error@-1 {{entry block of region may not have predecessors}}
+^bb42:
+  cf.br ^bb43
+^bb43:
+  cf.br ^bb42
 }
 
 // -----
 
-mlfunc @illegalattrs() -> ()
-  attributes { key } { // expected-error {{expected ':' in attribute list}}
-bb42:
+func.func @no_return() {
+  %x = arith.constant 0 : i32
+  %y = arith.constant 1 : i32  // expected-error {{block with no terminator}}
+}
+
+// -----
+
+func.func @no_terminator() {
+  cf.br ^bb1
+^bb1:
+  %x = arith.constant 0 : i32
+  %y = arith.constant 1 : i32  // expected-error {{block with no terminator}}
+}
+
+// -----
+
+func.func @no_block_arg_enclosing_parens() {
+^bb %x: i32 : // expected-error {{expected ':' after block name}}
   return
 }
 
 // -----
 
-mlfunc @no_return() {  // expected-error {{ML function must end with return statement}}
-  "foo"() : () -> ()
-}
-
-// -----
-
-"       // expected-error {{expected}}
-"
-
-// -----
-
-"       // expected-error {{expected}}
-
-// -----
-
-cfgfunc @bad_op_type() {
-bb40:
+func.func @bad_op_type() {
+^bb40:
   "foo"() : i32  // expected-error {{expected function type}}
   return
 }
 // -----
 
-cfgfunc @no_terminator() {
-bb40:
+func.func @no_terminator() {
+^bb40:
   "foo"() : ()->()
   ""() : ()->()  // expected-error {{empty operation name is invalid}}
   return
@@ -196,238 +106,143 @@ bb40:
 
 // -----
 
-extfunc @illegaltype(i0) // expected-error {{invalid integer width}}
-
-// -----
-
-mlfunc @malformed_for_percent() {
-  for i = 1 to 10 { // expected-error {{expected SSA identifier for the loop variable}}
-
-// -----
-
-mlfunc @malformed_for_equal() {
-  for %i 1 to 10 { // expected-error {{expected '='}}
-
-// -----
-
-mlfunc @malformed_for_to() {
-  for %i = 1 too 10 { // expected-error {{expected 'to' between bounds}}
-  }
+func.func @non_operation() {
+  test.asd   // expected-error {{custom op 'test.asd' is unknown}}
 }
 
 // -----
 
-mlfunc @incomplete_for() {
-  for %i = 1 to 10 step 2
-}        // expected-error {{expected '{' before statement list}}
-
-// -----
-
-mlfunc @nonconstant_step(%1 : i32) {
-  for %2 = 1 to 5 step %1 { // expected-error {{expected integer}}
-
-// -----
-
-mlfunc @for_negative_stride() {
-  for %i = 1 to 10 step -1
-}        // expected-error {{step has to be a positive integer}}
-
-// -----
-
-mlfunc @non_statement() {
-  asd   // expected-error {{custom op 'asd' is unknown}}
+func.func @unknown_dialect_operation() {
+  // expected-error@below {{Dialect `foo' not found for custom op 'foo.asd'}}
+  // expected-note-re@below {{Registered dialects:{{.*}} test{{.*}}}}
+  foo.asd
 }
 
 // -----
 
-mlfunc @invalid_if_conditional1() {
-  for %i = 1 to 10 {
-    if () { // expected-error {{expected ':' or '['}}
-  }
+func.func @non_operation() {
+  // expected-error@+1 {{custom op 'asd' is unknown (tried 'func.asd' as well)}}
+  asd
 }
 
 // -----
 
-mlfunc @invalid_if_conditional2() {
-  for %i = 1 to 10 {
-    if (i)[N] : (i >= )  // expected-error {{expected '== 0' or '>= 0' at end of affine constraint}}
-  }
-}
-
-// -----
-
-mlfunc @invalid_if_conditional3() {
-  for %i = 1 to 10 {
-    if (i)[N] : (i == 1) // expected-error {{expected '0' after '=='}}
-  }
-}
-
-// -----
-
-mlfunc @invalid_if_conditional4() {
-  for %i = 1 to 10 {
-    if (i)[N] : (i >= 2) // expected-error {{expected '0' after '>='}}
-  }
-}
-
-// -----
-
-mlfunc @invalid_if_conditional5() {
-  for %i = 1 to 10 {
-    if (i)[N] : (i <= 0 ) // expected-error {{expected '== 0' or '>= 0' at end of affine constraint}}
-  }
-}
-
-// -----
-
-mlfunc @invalid_if_conditional6() {
-  for %i = 1 to 10 {
-    if (i) : (i) // expected-error {{expected '== 0' or '>= 0' at end of affine constraint}}
-  }
-}
-
-// -----
-// TODO (support if (1)?
-mlfunc @invalid_if_conditional7() {
-  for %i = 1 to 10 {
-    if (i) : (1) // expected-error {{expected '== 0' or '>= 0' at end of affine constraint}}
-  }
-}
-
-// -----
-
-#map = (d0) -> (%  // expected-error {{invalid SSA name}}
-
-// -----
-
-cfgfunc @test() {
-bb40:
+func.func @test() {
+^bb40:
   %1 = "foo"() : (i32)->i64 // expected-error {{expected 0 operand types but had 1}}
   return
 }
 
 // -----
 
-cfgfunc @redef() {
-bb42:
-  %x = "xxx"(){index: 0} : ()->i32 // expected-error {{previously defined here}}
-  %x = "xxx"(){index: 0} : ()->i32 // expected-error {{redefinition of SSA value '%x'}}
+func.func @redef() {
+^bb42:
+  %x = "xxx"(){index = 0} : ()->i32 // expected-note {{previously defined here}}
+  %x = "xxx"(){index = 0} : ()->i32 // expected-error {{redefinition of SSA value '%x'}}
   return
 }
 
 // -----
 
-cfgfunc @undef() {
-bb42:
+func.func @undef() {
+^bb42:
   %x = "xxx"(%y) : (i32)->i32   // expected-error {{use of undeclared SSA value}}
   return
 }
 
 // -----
 
-mlfunc @missing_rbrace() {
-  return
-mlfunc @d() {return} // expected-error {{expected '}' after statement list}}
-
-// -----
-
-mlfunc @malformed_type(%a : intt) { // expected-error {{expected type}}
+func.func @malformed_type(%a : intt) { // expected-error {{expected non-function type}}
 }
 
 // -----
 
-cfgfunc @resulterror() -> i32 {
-bb42:
-  return    // expected-error {{'return' op has 0 operands, but enclosing function returns 1}}
-}
-
-// -----
-
-mlfunc @mlfunc_resulterror() -> i32 {
-  return // expected-error {{'return' op has 0 operands, but enclosing function returns 1}}
-}
-
-// -----
-
-cfgfunc @argError() {
-bb1(%a: i64):  // expected-error {{previously defined here}}
-  br bb2
-bb2(%a: i64):  // expected-error{{redefinition of SSA value '%a'}}
+func.func @argError() {
+^bb1(%a: i64):  // expected-note {{previously defined here}}
+  cf.br ^bb2
+^bb2(%a: i64):  // expected-error{{redefinition of SSA value '%a'}}
   return
 }
 
 // -----
 
-cfgfunc @bbargMismatch(i32, f32) { // expected-error {{first block of cfgfunc must have 2 arguments to match function signature}}
-bb42(%0: f32):
+func.func @br_mismatch() {
+^bb0:
+  %0:2 = "foo"() : () -> (i1, i17)
+  // expected-error @+1 {{branch has 2 operands for successor #0, but target block has 1}}
+  cf.br ^bb1(%0#1, %0#0 : i17, i1)
+
+^bb1(%x: i17):
   return
 }
 
 // -----
 
-cfgfunc @br_mismatch() {
-bb0:
-  %0 = "foo"() : () -> (i1, i17)
-  // expected-error @+1 {{branch has 2 operands, but target block has 1}}
-  br bb1(%0#1, %0#0 : i17, i1)
+func.func @succ_arg_type_mismatch() {
+^bb0:
+  %0 = "getBool"() : () -> i1
+  // expected-error @+1 {{type mismatch for bb argument #0 of successor #0}}
+  cf.br ^bb1(%0 : i1)
 
-bb1(%x: i17):
+^bb1(%x: i32):
   return
 }
 
-// -----
-
-// Test no nested vector.
-extfunc @vectors(vector<1 x vector<1xi32>>, vector<2x4xf32>)
-// expected-error@-1 {{vector elements must be primitives}}
 
 // -----
 
-cfgfunc @condbr_notbool() {
-bb0:
-  %a = "foo"() : () -> i32 // expected-error {{prior use here}}
-  cond_br %a, bb0, bb0 // expected-error {{use of value '%a' expects different type than prior uses}}
-// expected-error@-1 {{expected condition type was boolean (i1)}}
+func.func @condbr_notbool() {
+^bb0:
+  %a = "foo"() : () -> i32 // expected-note {{prior use here}}
+  cf.cond_br %a, ^bb0, ^bb0 // expected-error {{use of value '%a' expects different type than prior uses: 'i1' vs 'i32'}}
 }
 
 // -----
 
-cfgfunc @condbr_badtype() {
-bb0:
+func.func @condbr_badtype() {
+^bb0:
   %c = "foo"() : () -> i1
   %a = "foo"() : () -> i32
-  cond_br %c, bb0(%a, %a : i32, bb0) // expected-error {{expected type}}
+  cf.cond_br %c, ^bb0(%a, %a : i32, ^bb0) // expected-error {{expected non-function type}}
 }
 
 // -----
 
-cfgfunc @condbr_a_bb_is_not_a_type() {
-bb0:
+func.func @condbr_a_bb_is_not_a_type() {
+^bb0:
   %c = "foo"() : () -> i1
   %a = "foo"() : () -> i32
-  cond_br %c, bb0(%a, %a : i32, i32), i32 // expected-error {{expected basic block name}}
+  cf.cond_br %c, ^bb0(%a, %a : i32, i32), i32 // expected-error {{expected block name}}
 }
 
 // -----
 
-cfgfunc @undef() {
-bb0:
+func.func @successors_in_non_terminator(%a : i32, %b : i32) {
+  %c = "arith.addi"(%a, %b)[^bb1] : () -> () // expected-error {{successors in non-terminator}}
+^bb1:
+  return
+}
+
+// -----
+
+func.func @undef() {
+^bb0:
   %x = "xxx"(%y) : (i32)->i32   // expected-error {{use of undeclared SSA value name}}
   return
 }
 
 // -----
 
-mlfunc @undef() {
-  %x = "xxx"(%y) : (i32)->i32   // expected-error {{use of undefined SSA value %y}}
+func.func @undef() {
+  %x = "xxx"(%y) : (i32)->i32   // expected-error {{use of undeclared SSA value name}}
   return
 }
 
 // -----
 
-mlfunc @duplicate_induction_var() {
-  for %i = 1 to 10 {   // expected-error {{previously defined here}}
-    for %i = 1 to 10 { // expected-error {{redefinition of SSA value '%i'}}
+func.func @duplicate_induction_var() {
+  affine.for %i = 1 to 10 {   // expected-note {{previously referenced here}}
+    affine.for %i = 1 to 10 { // expected-error {{region entry argument '%i' is already in use}}
     }
   }
   return
@@ -435,295 +250,452 @@ mlfunc @duplicate_induction_var() {
 
 // -----
 
-mlfunc @dominance_failure() {
-  for %i = 1 to 10 {
+func.func @name_scope_failure() {
+  affine.for %i = 1 to 10 {
   }
-  "xxx"(%i) : (index)->()   // expected-error {{operand #0 does not dominate this use}}
+  "xxx"(%i) : (index)->()   // expected-error {{use of undeclared SSA value name}}
   return
 }
 
 // -----
 
-cfgfunc @dominance_failure() {
-bb0:
+func.func @dominance_failure() {
+^bb0:
   "foo"(%x) : (i32) -> ()    // expected-error {{operand #0 does not dominate this use}}
-  br bb1
-bb1:
-  %x = "bar"() : () -> i32    // expected-note {{operand defined here}}
+  cf.br ^bb1
+^bb1:
+  %x = "bar"() : () -> i32    // expected-note {{operand defined here (op in the same region)}}
   return
 }
 
 // -----
 
-mlfunc @return_type_mismatch() -> i32 {
-  %0 = "foo"() : ()->f32
-  return %0 : f32  // expected-error {{type of return operand 0 doesn't match function result type}}
-}
-
-// -----
-
-mlfunc @return_inside_loop() -> i8 {
-  for %i = 1 to 100 {
-    %a = "foo"() : ()->i8
-    return %a : i8
-    // expected-error@-1 {{'return' op must be the last statement in the ML function}}
-  }
-}
-
-// -----
-
-extfunc @redef()
-extfunc @redef()  // expected-error {{redefinition of function named 'redef'}}
-
-// -----
-
-cfgfunc @foo() {
-bb0:
-  %x = constant @foo : (i32) -> ()  // expected-error {{reference to function with mismatched type}}
+func.func @dominance_failure() {
+^bb0:
+  "foo"(%x) : (i32) -> ()    // expected-error {{operand #0 does not dominate this use}}
+  %x = "bar"() : () -> i32    // expected-note {{operand defined here (op in the same block)}}
+  cf.br ^bb1
+^bb1:
   return
 }
 
 // -----
 
-cfgfunc @undefined_function() {
-bb0:
-  %x = constant @bar : (i32) -> ()  // expected-error {{reference to undefined function 'bar'}}
+func.func @dominance_failure() {
+  "foo"() ({
+    "foo"(%x) : (i32) -> ()    // expected-error {{operand #0 does not dominate this use}}
+  }) : () -> ()
+  %x = "bar"() : () -> i32    // expected-note {{operand defined here (op in a parent region)}}
   return
 }
 
 // -----
 
-#map1 = (i)[j] -> (i+j)
-
-mlfunc @bound_symbol_mismatch(%N : index) {
-  for %i = #map1(%N) to 100 {
-  // expected-error@-1 {{symbol operand count and affine map symbol count must match}}
-  }
+func.func @dominance_failure() {  //  expected-note {{operand defined as a block argument (block #1 in the same region)}}
+^bb0:
+  cf.br ^bb1(%x : i32)    // expected-error {{operand #0 does not dominate this use}}
+^bb1(%x : i32):
   return
 }
 
 // -----
 
-#map1 = (i)[j] -> (i+j)
-
-mlfunc @bound_dim_mismatch(%N : index) {
-  for %i = #map1(%N, %N)[%N] to 100 {
-  // expected-error@-1 {{dim operand count and affine map dim count must match}}
-  }
+func.func @dominance_failure() {  //  expected-note {{operand defined as a block argument (block #1 in a parent region)}}
+^bb0:
+  %f = "foo"() ({
+    "foo"(%x) : (i32) -> ()    // expected-error {{operand #0 does not dominate this use}}
+  }) : () -> (i32)
+  cf.br ^bb1(%f : i32)
+^bb1(%x : i32):
   return
 }
 
 // -----
 
-#map1 = (i)[j] -> (i+j)
-
-mlfunc @invalid_dim_nested(%N : index) {
-  for %i = 1 to 100 {
-    %a = "foo"(%N) : (index)->(index)
-    for %j = 1 to #map1(%a)[%i] {
-    // expected-error@-1 {{value '%a' cannot be used as a dimension id}}
-    }
-  }
-  return
-}
+// expected-error@+1 {{expected three consecutive dots for an ellipsis}}
+func.func @malformed_ellipsis_one(.)
 
 // -----
 
-#map1 = (i)[j] -> (i+j)
-
-mlfunc @invalid_dim_affine_apply(%N : index) {
-  for %i = 1 to 100 {
-    %a = "foo"(%N) : (index)->(index)
-    %w = affine_apply (i)->(i+1) (%a)
-    for %j = 1 to #map1(%w)[%i] {
-    // expected-error@-1 {{value '%w' cannot be used as a dimension id}}
-    }
-  }
-  return
-}
+// expected-error@+1 {{expected three consecutive dots for an ellipsis}}
+func.func @malformed_ellipsis_two(..)
 
 // -----
 
-#map1 = (i)[j] -> (i+j)
-
-mlfunc @invalid_symbol_iv(%N : index) {
-  for %i = 1 to 100 {
-    %a = "foo"(%N) : (index)->(index)
-    for %j = 1 to #map1(%N)[%i] {
-    // expected-error@-1 {{value '%i' cannot be used as a symbol}}
-    }
-  }
-  return
-}
+func.func private @redef()  // expected-note {{see existing symbol definition here}}
+func.func private @redef()  // expected-error {{redefinition of symbol named 'redef'}}
 
 // -----
 
-#map1 = (i)[j] -> (i+j)
-
-mlfunc @invalid_symbol_nested(%N : index) {
-  for %i = 1 to 100 {
-    %a = "foo"(%N) : (index)->(index)
-    for %j = 1 to #map1(%N)[%a] {
-    // expected-error@-1 {{value '%a' cannot be used as a symbol}}
-    }
-  }
-  return
-}
-
-// -----
-
-#map1 = (i)[j] -> (i+j)
-
-mlfunc @invalid_symbol_affine_apply(%N : index) {
-  for %i = 1 to 100 {
-    %w = affine_apply (i)->(i+1) (%i)
-    for %j = 1 to #map1(%i)[%w] {
-    // expected-error@-1 {{value '%w' cannot be used as a symbol}}
-    }
-  }
-  return
-}
-
-// -----
-
-mlfunc @large_bound() {
-  for %i = 1 to 9223372036854775810 {
-  // expected-error@-1 {{bound or step is too large for index}}
-  }
-  return
-}
-
-// -----
-
-mlfunc @max_in_upper_bound(%N : index) {
-  for %i = 1 to max (i)->(N, 100) { //expected-error {{expected SSA operand}}
-  }
-  return
-}
-
-// -----
-
-mlfunc @step_typo() {
-  for %i = 1 to 100 step -- 1 { //expected-error {{expected integer}}
-  }
-  return
-}
-
-// -----
-
-mlfunc @invalid_bound_map(%N : i32) {
-  for %i = 1 to (i)->(j)(%N) { //expected-error {{use of undeclared identifier}}
-  }
-  return
-}
-
-// -----
-#set0 = (i)[N] : (i >= 0, N - i >= 0)
-
-mlfunc @invalid_if_operands1(%N : index) {
-  for %i = 1 to 10 {
-    if #set0(%i) {
-    // expected-error@-1 {{symbol operand count and integer set symbol count must match}}
-
-// -----
-#set0 = (i)[N] : (i >= 0, N - i >= 0)
-
-mlfunc @invalid_if_operands2(%N : index) {
-  for %i = 1 to 10 {
-    if #set0()[%N] {
-    // expected-error@-1 {{dim operand count and integer set dim count must match}}
-
-// -----
-#set0 = (i)[N] : (i >= 0, N - i >= 0)
-
-mlfunc @invalid_if_operands3(%N : index) {
-  for %i = 1 to 10 {
-    if #set0(%i)[%i] {
-    // expected-error@-1 {{value '%i' cannot be used as a symbol}}
-
-// -----
-// expected-error@+1 {{expected '"' in string literal}}
-"J// -----
-mlfunc @calls(%arg0 : i32) {
-  // expected-error@+1 {{expected type}}
+func.func @calls(%arg0: i32) {
+  // expected-error@+1 {{expected non-function type}}
   %z = "casdasda"(%x) : (ppop32) -> i32
 }
-// -----
-// expected-error@+2 {{expected SSA operand}}
-cfgfunc@n(){b(
+
 // -----
 
-cfgfunc @elementsattr_non_tensor_type() -> () {
-bb0:
-  "foo"(){bar: dense<i32, [4]>} : () -> () // expected-error {{expected elements literal has a tensor or vector type}}
+// expected-error@+1 {{expected SSA operand}}
+func.func @n(){^b(
+
+// -----
+
+// This used to crash the parser, but should just error out by interpreting
+// `tensor` as operator rather than as a type.
+func.func @f(f32) {
+^bb0(%a : f32):
+  %18 = arith.cmpi slt, %idx, %idx : index
+  tensor<42 x index  // expected-error {{custom op 'tensor' is unknown (tried 'func.tensor' as well)}}
+  return
 }
 
 // -----
 
-cfgfunc @elementsattr_non_ranked() -> () {
-bb0:
-  "foo"(){bar: dense<tensor<?xi32>, [4]>} : () -> () // expected-error {{tensor literals must be ranked and have static shape}}
+func.func @f(%m : memref<?x?xf32>) {
+  affine.for %i0 = 0 to 42 {
+    // expected-note@+1 {{previously referenced here}}
+    %x = memref.load %m[%i0, %i1] : memref<?x?xf32>
+  }
+  // expected-error@+1 {{region entry argument '%i1' is already in use}}
+  affine.for %i1 = 0 to 42 {
+  }
+  return
 }
 
 // -----
 
-cfgfunc @elementsattr_shape_mismatch() -> () {
-bb0:
-  "foo"(){bar: dense<tensor<5xi32>, [4]>} : () -> () // expected-error {{inferred shape of elements literal ([1]) does not match type ([5])}}
+func.func @dialect_type_empty_namespace(!<"">) -> () { // expected-error {{invalid type identifier}}
+  return
 }
 
 // -----
 
-cfgfunc @elementsattr_invalid() -> () {
-bb0:
-  "foo"(){bar: dense<tensor<2xi32>, [4, [5]]>} : () -> () // expected-error {{tensor literal is invalid; ranks are not consistent between elements}}
+func.func @dialect_type_missing_greater(!foo<) -> () { // expected-error {{unbalanced '<' character in pretty dialect name}}
+  return
+
+// -----
+
+func.func @type_alias_unknown(!unknown_alias) -> () { // expected-error {{undefined symbol alias id 'unknown_alias'}}
+  return
 }
 
 // -----
 
-cfgfunc @elementsattr_badtoken() -> () {
-bb0:
-  "foo"(){bar: dense<tensor<1xi32>, [tf_opaque]>} : () -> () // expected-error {{expected '[' or scalar constant inside tensor literal}}
+// expected-error @+1 {{type names with a '.' are reserved for dialect-defined names}}
+!foo.bar = i32
+
+// -----
+
+!missing_eq_alias i32 // expected-error {{expected '=' in type alias definition}}
+
+// -----
+
+!missing_type_alias = // expected-error {{expected non-function type}}
+
+// -----
+
+!redef_alias = i32
+!redef_alias = i32 // expected-error {{redefinition of type alias id 'redef_alias'}}
+
+// -----
+
+func.func @invalid_nested_dominance() {
+  "test.ssacfg_region"() ({
+    // expected-error @+1 {{operand #0 does not dominate this use}}
+    "foo.use" (%1) : (i32) -> ()
+    cf.br ^bb2
+
+  ^bb2:
+    // expected-note @+1 {{operand defined here}}
+    %1 = arith.constant 0 : i32
+    "foo.yield" () : () -> ()
+  }) : () -> ()
+  return
 }
 
 // -----
 
-cfgfunc @elementsattr_floattype1() -> () {
-bb0:
-  "foo"(){bar: dense<tensor<1xi32>, [4.0]>} : () -> () // expected-error {{expected tensor literal element has integer type}}
+// expected-error @+1 {{unbalanced '<' character in pretty dialect name}}
+func.func @invalid_unknown_type_dialect_name() -> !invalid.dialect<!x@#]!@#>
+
+// -----
+
+// expected-error @+1 {{expected '<' in tuple type}}
+func.func @invalid_tuple_missing_less(tuple i32>)
+
+// -----
+
+// expected-error @+1 {{expected '>' in tuple type}}
+func.func @invalid_tuple_missing_greater(tuple<i32)
+
+// -----
+
+// Should not crash because of deletion order here.
+func.func @invalid_region_dominance() {
+  "foo.use" (%1) : (i32) -> ()
+  "foo.region"() ({
+    %1 = arith.constant 0 : i32  // This value is used outside of the region.
+    "foo.yield" () : () -> ()
+  }, {
+    // expected-error @+1 {{expected operation name in quotes}}
+    %2 = arith.constant 1 i32  // Syntax error causes region deletion.
+  }) : () -> ()
+  return
 }
 
 // -----
 
-cfgfunc @elementsattr_floattype2() -> () {
-bb0:
-  "foo"(){bar: dense<tensor<1xf32>, [4]>} : () -> () // expected-error {{expected tensor literal element has float type}}
+// Should not crash because of deletion order here.
+func.func @invalid_region_block() {
+  "foo.branch"()[^bb2] : () -> ()  // Attempt to jump into the region.
+
+^bb1:
+  "foo.region"() ({
+    ^bb2:
+      "foo.yield"() : () -> ()
+  }, {
+    // expected-error @+1 {{expected operation name in quotes}}
+    %2 = arith.constant 1 i32  // Syntax error causes region deletion.
+  }) : () -> ()
 }
 
 // -----
 
-cfgfunc @elementsattr_toolarge1() -> () {
-bb0:
-  "foo"(){bar: dense<tensor<1xi8>, [777]>} : () -> () // expected-error {{tensor literal element has more bits than that specified in the type}}
+// Should not crash because of deletion order here.
+func.func @invalid_region_dominance() {
+  "foo.use" (%1) : (i32) -> ()
+  "foo.region"() ({
+    "foo.region"() ({
+      %1 = arith.constant 0 : i32  // This value is used outside of the region.
+      "foo.yield" () : () -> ()
+    }) : () -> ()
+  }, {
+    // expected-error @+1 {{expected operation name in quotes}}
+    %2 = arith.constant 1 i32  // Syntax error causes region deletion.
+  }) : () -> ()
+  return
 }
 
 // -----
 
-cfgfunc @elementsattr_toolarge2() -> () {
-bb0:
-  "foo"(){bar: dense<tensor<1xi8>, [-777]>} : () -> () // expected-error {{tensor literal element has more bits than that specified in the type}}
+func.func @unfinished_region_list() {
+  // expected-error@+1 {{expected ')' to end region list}}
+  "region"() ({},{},{} : () -> ()
 }
 
 // -----
 
-cfgfunc @elementsattr_malformed_opaque() -> () {
-bb0:
-  "foo"(){bar: opaque<tensor<1xi8>, "0xQZz123">} : () -> () // expected-error {{opaque string only contains hex digits}}
+func.func @multi_result_missing_count() {
+  // expected-error@+1 {{expected integer number of results}}
+  %0: = "foo" () : () -> (i32, i32)
+  return
 }
 
 // -----
 
-cfgfunc @elementsattr_malformed_opaque1() -> () {
-bb0:
-  "foo"(){bar: opaque<tensor<1xi8>, "00abc">} : () -> () // expected-error {{opaque string should start with '0x'}}
+func.func @multi_result_zero_count() {
+  // expected-error@+1 {{expected named operation to have at least 1 result}}
+  %0:0 = "foo" () : () -> (i32, i32)
+  return
+}
+
+// -----
+
+func.func @multi_result_invalid_identifier() {
+  // expected-error@+1 {{expected valid ssa identifier}}
+  %0, = "foo" () : () -> (i32, i32)
+  return
+}
+
+// -----
+
+func.func @multi_result_mismatch_count() {
+  // expected-error@+1 {{operation defines 2 results but was provided 1 to bind}}
+  %0:1 = "foo" () : () -> (i32, i32)
+  return
+}
+
+// -----
+
+func.func @multi_result_mismatch_count() {
+  // expected-error@+1 {{operation defines 2 results but was provided 3 to bind}}
+  %0, %1, %3 = "foo" () : () -> (i32, i32)
+  return
+}
+
+// -----
+
+func.func @no_result_with_name() {
+  // expected-error@+1 {{cannot name an operation with no results}}
+  %0 = "foo" () : () -> ()
+  return
+}
+
+// -----
+
+func.func @conflicting_names() {
+  // expected-note@+1 {{previously defined here}}
+  %foo, %bar  = "foo" () : () -> (i32, i32)
+
+  // expected-error@+1 {{redefinition of SSA value '%bar'}}
+  %bar, %baz  = "foo" () : () -> (i32, i32)
+  return
+}
+
+// -----
+
+func.func @ssa_name_missing_eq() {
+  // expected-error@+1 {{expected '=' after SSA name}}
+  %0:2 "foo" () : () -> (i32, i32)
+  return
+}
+
+// -----
+
+// expected-error @+1 {{attribute names with a '.' are reserved for dialect-defined names}}
+#foo.attr = i32
+
+// -----
+
+func.func @invalid_region_dominance() {
+  "test.ssacfg_region"() ({
+    // expected-error @+1 {{operand #0 does not dominate this use}}
+    "foo.use" (%def) : (i32) -> ()
+    "foo.yield" () : () -> ()
+  }, {
+    // expected-note @+1 {{operand defined here}}
+    %def = "foo.def" () : () -> i32
+  }) : () -> ()
+  return
+}
+
+// -----
+
+func.func @invalid_region_dominance() {
+  // expected-note @+1 {{operand defined here}}
+  %def = "test.ssacfg_region"() ({
+    // expected-error @+1 {{operand #0 does not dominate this use}}
+    "foo.use" (%def) : (i32) -> ()
+    "foo.yield" () : () -> ()
+  }) : () -> (i32)
+  return
+}
+
+// -----
+
+// expected-error @+1 {{unbalanced '<' character in pretty dialect name}}
+func.func @bad_arrow(%arg : !unreg.ptr<(i32)->)
+
+// -----
+
+func.func @forward_reference_type_check() -> (i8) {
+  cf.br ^bb2
+
+^bb1:
+  // expected-note @+1 {{previously used here with type 'i8'}}
+  return %1 : i8
+
+^bb2:
+  // expected-error @+1 {{definition of SSA value '%1#0' has type 'f32'}}
+  %1 = "bar"() : () -> (f32)
+  cf.br ^bb1
+}
+
+// -----
+
+func.func @dominance_error_in_unreachable_op() -> i1 {
+  %c = arith.constant false
+  return %c : i1
+^bb0:
+  "test.ssacfg_region" () ({ // unreachable
+    ^bb1:
+// expected-error @+1 {{operand #0 does not dominate this use}}
+      %2:3 = "bar"(%1) : (i64) -> (i1,i1,i1)
+      cf.br ^bb4
+    ^bb2:
+      cf.br ^bb2
+    ^bb4:
+      %1 = "foo"() : ()->i64   // expected-note {{operand defined here}}
+  }) : () -> ()
+  return %c : i1
+}
+
+// -----
+
+func.func @invalid_region_dominance_with_dominance_free_regions() {
+  test.graph_region {
+    "foo.use" (%1) : (i32) -> ()
+    "foo.region"() ({
+      %1 = arith.constant 0 : i32  // This value is used outside of the region.
+      "foo.yield" () : () -> ()
+    }, {
+      // expected-error @+1 {{expected operation name in quotes}}
+      %2 = arith.constant 1 i32  // Syntax error causes region deletion.
+    }) : () -> ()
+  }
+  return
+}
+
+// -----
+
+// expected-error@+1 {{expected valid attribute name}}
+"t"(){""}
+
+// -----
+
+// expected-error @below {{expected bare identifier or keyword}}
+test.parse_custom_operation_name_api(@foo) {}
+
+// -----
+
+// expected-error @below {{expected bare identifier or keyword}}
+test.parse_custom_operation_name_api(42) {}
+
+// -----
+
+// This makes sure we emit an error at the end of the correct line, the : is
+// expected at the end of foo, not on the return line.
+func.func @error_at_end_of_line() {
+  // expected-error@+1 {{expected ':' followed by operation type}}
+  %0 = "foo"()
+  return
+}
+
+// -----
+
+// This makes sure we emit an error at the end of the correct line, the : is
+// expected at the end of foo, not on the return line.
+func.func @error_at_end_of_line() {
+  %0 = "foo"()
+  // expected-error@-1 {{expected ':' followed by operation type}}
+
+  // This is a comment and so is the thing above.
+  return
+}
+
+// -----
+
+// This makes sure we emit an error at the end of the correct line, the : is
+// expected at the end of foo, not on the return line.
+// This shows that it backs up to before the comment.
+func.func @error_at_end_of_line() {
+  %0 = "foo"()  // expected-error {{expected ':' followed by operation type}}
+  return
+}
+
+// -----
+
+@foo   // expected-error {{expected operation name in quotes}}
+
+// -----
+
+func.func @drop_references_on_block_parse_error(){
+  "test.user"(%i, %1) : (index, index) -> ()
+  "test.op_with_region"() ({
+  ^bb0(%i : index):
+    // expected-error @below{{expected operation name in quotes}}
+    %1 = "test.foo"() : () -> (index)
+    // Syntax error to abort parsing this block.
+    123
+  }) : () -> ()
+  return
 }

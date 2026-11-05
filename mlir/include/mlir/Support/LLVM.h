@@ -1,19 +1,10 @@
 //===- LLVM.h - Import and forward declare core LLVM types ------*- C++ -*-===//
 //
-// Copyright 2019 The MLIR Authors.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 //
 // This file forward declares and imports various common LLVM datatypes that
 // MLIR wants to use unqualified.
@@ -27,70 +18,151 @@
 #ifndef MLIR_SUPPORT_LLVM_H
 #define MLIR_SUPPORT_LLVM_H
 
-// We include these two headers because they cannot be practically forward
+// We include this header because it cannot be practically forward
 // declared, and are effectively language features.
-#include "llvm/ADT/None.h"
 #include "llvm/Support/Casting.h"
+
+// We include this header because large portions of mlir would have to include
+// it anyway.
+#include "llvm/Support/LogicalResult.h"
+
+// Workaround for clang-5 (PR41549)
+#if defined(__clang_major__)
+#if __clang_major__ <= 5
+#include "llvm/ADT/DenseMapInfo.h"
+#include "llvm/ADT/SmallVector.h"
+#endif
+#endif
 
 // Forward declarations.
 namespace llvm {
-// Containers.
+// String types
+template <unsigned N>
+class SmallString;
 class StringRef;
 class StringLiteral;
 class Twine;
-template <typename T> class SmallPtrSetImpl;
-template <typename T, unsigned N> class SmallPtrSet;
-template <typename T> class SmallVectorImpl;
-template <typename T, unsigned N> class SmallVector;
-template <unsigned N> class SmallString;
-template <typename T> class ArrayRef;
-template <typename T> class MutableArrayRef;
-template <typename T> class TinyPtrVector;
-template <typename T> class Optional;
-template <typename PT1, typename PT2> class PointerUnion;
+
+// Containers.
+template <typename T>
+class ArrayRef;
+class BitVector;
 namespace detail {
-template <typename KeyT, typename ValueT> struct DenseMapPair;
-}
-template <typename T> struct DenseMapInfo;
+template <typename KeyT, typename ValueT>
+struct DenseMapPair;
+} // namespace detail
 template <typename KeyT, typename ValueT, typename KeyInfoT, typename BucketT>
 class DenseMap;
+template <typename T, typename Enable>
+struct DenseMapInfo;
+template <typename ValueT, typename ValueInfoT>
+class DenseSet;
+class MallocAllocator;
+template <typename T>
+class MutableArrayRef;
+template <typename... PT>
+class PointerUnion;
+template <typename T, typename Vector, typename Set, unsigned N>
+class SetVector;
+template <typename T, unsigned N>
+class SmallPtrSet;
+template <typename T>
+class SmallPtrSetImpl;
+template <typename T, unsigned N>
+class SmallVector;
+template <typename T>
+class SmallVectorImpl;
+template <typename AllocatorTy>
+class StringSet;
+template <typename T, typename R>
+class StringSwitch;
+template <typename T>
+class TinyPtrVector;
+template <typename T, typename ResultT>
+class TypeSwitch;
 
 // Other common classes.
-class raw_ostream;
 class APInt;
+class DynamicAPInt;
+class APSInt;
 class APFloat;
-} // end namespace llvm
+template <typename Fn>
+class function_ref;
+template <typename IteratorT>
+class iterator_range;
+class raw_ostream;
+class SMLoc;
+class SMRange;
+} // namespace llvm
 
 namespace mlir {
 // Casting operators.
 using llvm::cast;
+using llvm::cast_if_present;
 using llvm::cast_or_null;
 using llvm::dyn_cast;
+using llvm::dyn_cast_if_present;
 using llvm::dyn_cast_or_null;
 using llvm::isa;
+using llvm::isa_and_nonnull;
+using llvm::isa_and_present;
 
+// String types
+using llvm::SmallString;
+using llvm::StringLiteral;
+using llvm::StringRef;
+using llvm::Twine;
+
+// Container Related types
+//
 // Containers.
 using llvm::ArrayRef;
-using llvm::DenseMap;
+using llvm::BitVector;
+template <typename T, typename Enable = void>
+using DenseMapInfo = llvm::DenseMapInfo<T, Enable>;
+template <typename KeyT, typename ValueT,
+          typename KeyInfoT = DenseMapInfo<KeyT>,
+          typename BucketT = llvm::detail::DenseMapPair<KeyT, ValueT>>
+using DenseMap = llvm::DenseMap<KeyT, ValueT, KeyInfoT, BucketT>;
+template <typename ValueT, typename ValueInfoT = DenseMapInfo<ValueT>>
+using DenseSet = llvm::DenseSet<ValueT, ValueInfoT>;
+template <typename T, typename Vector = llvm::SmallVector<T, 0>,
+          typename Set = DenseSet<T>, unsigned N = 0>
+using SetVector = llvm::SetVector<T, Vector, Set, N>;
+template <typename AllocatorTy = llvm::MallocAllocator>
+using StringSet = llvm::StringSet<AllocatorTy>;
 using llvm::MutableArrayRef;
-using llvm::None;
-using llvm::Optional;
 using llvm::PointerUnion;
 using llvm::SmallPtrSet;
 using llvm::SmallPtrSetImpl;
-using llvm::SmallString;
 using llvm::SmallVector;
 using llvm::SmallVectorImpl;
-using llvm::StringLiteral;
-using llvm::StringRef;
+template <typename T, typename R = T>
+using StringSwitch = llvm::StringSwitch<T, R>;
 using llvm::TinyPtrVector;
-using llvm::Twine;
+template <typename T, typename ResultT = void>
+using TypeSwitch = llvm::TypeSwitch<T, ResultT>;
 
 // Other common classes.
 using llvm::APFloat;
 using llvm::APInt;
-using llvm::NoneType;
+using llvm::APSInt;
+using llvm::DynamicAPInt;
+template <typename Fn>
+using function_ref = llvm::function_ref<Fn>;
+using llvm::iterator_range;
 using llvm::raw_ostream;
+using llvm::SMLoc;
+using llvm::SMRange;
+
+// LogicalResult.
+using llvm::failed;
+using llvm::failure;
+using llvm::FailureOr;
+using llvm::LogicalResult;
+using llvm::ParseResult;
+using llvm::succeeded;
+using llvm::success;
 } // namespace mlir
 
 #endif // MLIR_SUPPORT_LLVM_H
