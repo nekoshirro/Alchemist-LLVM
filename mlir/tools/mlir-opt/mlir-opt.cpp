@@ -1,398 +1,341 @@
 //===- mlir-opt.cpp - MLIR Optimizer Driver -------------------------------===//
 //
-// Copyright 2019 The MLIR Authors.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//===----------------------------------------------------------------------===//
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// =============================================================================
-//
-// This is a command line utility that parses an MLIR file, runs an optimization
-// pass, then prints the result back out.  It is designed to support unit
-// testing.
+// Main entry function for mlir-opt for when built as standalone binary.
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Analysis/Passes.h"
-#include "mlir/IR/Attributes.h"
-#include "mlir/IR/CFGFunction.h"
-#include "mlir/IR/Location.h"
-#include "mlir/IR/MLFunction.h"
+#include "mlir/Config/mlir-config.h"
+#include "mlir/IR/AsmState.h"
+#include "mlir/IR/Dialect.h"
 #include "mlir/IR/MLIRContext.h"
-#include "mlir/IR/Module.h"
-#include "mlir/Parser.h"
-#include "mlir/Pass.h"
-#include "mlir/Support/PassNameParser.h"
-#include "mlir/TensorFlow/ControlFlowOps.h"
-#include "mlir/TensorFlow/Passes.h"
-#include "mlir/TensorFlowLite/Passes.h"
-#include "mlir/Transforms/CFGFunctionViewGraph.h"
-#include "mlir/Transforms/Passes.h"
-#include "mlir/XLA/Passes.h"
+#include "mlir/InitAllDialects.h"
+#include "mlir/InitAllExtensions.h"
+#include "mlir/InitAllPasses.h"
+#include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Support/FileUtilities.h"
+#include "mlir/Target/LLVMIR/Dialect/All.h"
+#include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/FileUtilities.h"
 #include "llvm/Support/InitLLVM.h"
-#include "llvm/Support/PrettyStackTrace.h"
-#include "llvm/Support/Regex.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/ToolOutputFile.h"
 
-using namespace mlir;
 using namespace llvm;
-using llvm::SMLoc;
+using namespace mlir;
 
-static cl::opt<std::string>
-inputFilename(cl::Positional, cl::desc("<input file>"), cl::init("-"));
+// Defined in the test directory, no public header.
+namespace mlir {
+void registerCloneTestPasses();
+void registerConvertToTargetEnvPass();
+void registerLazyLoadingTestPasses();
+void registerLoopLikeInterfaceTestPasses();
+void registerPassManagerTestPass();
+void registerPrintSpirvAvailabilityPass();
+void registerRegionTestPasses();
+void registerPrintTosaAvailabilityPass();
+void registerShapeFunctionTestPasses();
+void registerSideEffectTestPasses();
+void registerSliceAnalysisTestPass();
+void registerSymbolTestPasses();
+void registerTestAffineAccessAnalysisPass();
+void registerTestAffineDataCopyPass();
+void registerTestAffineLoopUnswitchingPass();
+void registerTestAffineReifyValueBoundsPass();
+void registerTestAffineWalk();
+void registerTestBytecodeRoundtripPasses();
+void registerTestDecomposeAffineOpPass();
+void registerTestFunc();
+void registerTestGpuLoweringPasses();
+void registerTestGpuMemoryPromotionPass();
+void registerTestLoopPermutationPass();
+void registerTestMatchers();
+void registerTestOperationEqualPass();
+void registerTestPreserveUseListOrders();
+void registerTestPrintDefUsePass();
+void registerTestPrintInvalidPass();
+void registerTestPrintNestingPass();
+void registerTestReducer();
+void registerTestSpirvEntryPointABIPass();
+void registerTestSpirvModuleCombinerPass();
+void registerTestTraitsPass();
+void registerTosaTestQuantUtilAPIPass();
+void registerVectorizerTestPass();
 
-static cl::opt<std::string>
-outputFilename("o", cl::desc("Output filename"), cl::value_desc("filename"),
-               cl::init("-"));
+namespace test {
+void registerCommutativityUtils();
+void registerConvertCallOpPass();
+void registerConvertFuncOpPass();
+void registerInliner();
+void registerInlinerCallback();
+void registerMemRefBoundCheck();
+void registerPatternsTestPass();
+void registerSimpleParametricTilingPass();
+void registerTestAffineLoopParametricTilingPass();
+void registerTestAliasAnalysisPass();
+void registerTestArithEmulateWideIntPass();
+void registerTestBuiltinAttributeInterfaces();
+void registerTestBuiltinDistinctAttributes();
+void registerTestCallGraphPass();
+void registerTestCfAssertPass();
+void registerTestCFGLoopInfoPass();
+void registerTestComposeSubView();
+void registerTestCompositePass();
+void registerTestControlFlowSink();
+void registerTestConvertToSPIRVPass();
+void registerTestDataLayoutPropagation();
+void registerTestDataLayoutQuery();
+void registerTestDeadCodeAnalysisPass();
+void registerTestDecomposeCallGraphTypes();
+void registerTestDiagnosticsPass();
+void registerTestDiagnosticsMetadataPass();
+void registerTestDominancePass();
+void registerTestDynamicPipelinePass();
+void registerTestEmulateNarrowTypePass();
+void registerTestExpandMathPass();
+void registerTestFooAnalysisPass();
+void registerTestComposeSubView();
+void registerTestMultiBuffering();
+void registerTestIRVisitorsPass();
+void registerTestGenericIRVisitorsPass();
+void registerTestInterfaces();
+void registerTestIRVisitorsPass();
+void registerTestLastModifiedPass();
+void registerTestLinalgDecomposeOps();
+void registerTestLinalgDropUnitDims();
+void registerTestLinalgElementwiseFusion();
+void registerTestLinalgGreedyFusion();
+void registerTestLinalgRankReduceContractionOps();
+void registerTestLinalgTransforms();
+void registerTestLivenessAnalysisPass();
+void registerTestLivenessPass();
+void registerTestLLVMLegalizePatternsPass();
+void registerTestLoopFusion();
+void registerTestLoopMappingPass();
+void registerTestLoopUnrollingPass();
+void registerTestLowerToArmSME();
+void registerTestLowerToLLVM();
+void registerTestMakeIsolatedFromAbovePass();
+void registerTestMatchReductionPass();
+void registerTestMathAlgebraicSimplificationPass();
+void registerTestMathPolynomialApproximationPass();
+void registerTestMathToVCIXPass();
+void registerTestIrdlTestDialectConversionPass();
+void registerTestMemRefDependenceCheck();
+void registerTestMemRefStrideCalculation();
+void registerTestMemRefToLLVMWithTransforms();
+void registerTestMeshReshardingSpmdizationPass();
+void registerTestMeshSimplificationsPass();
+void registerTestMultiBuffering();
+void registerTestNextAccessPass();
+void registerTestNVGPULowerings();
+void registerTestOpaqueLoc();
+void registerTestOpLoweringPasses();
+void registerTestPadFusion();
+void registerTestRecursiveTypesPass();
+void registerTestSCFUpliftWhileToFor();
+void registerTestSCFUtilsPass();
+void registerTestSCFWhileOpBuilderPass();
+void registerTestSCFWrapInZeroTripCheckPasses();
+void registerTestShapeMappingPass();
+void registerTestSingleFold();
+void registerTestSliceAnalysisPass();
+void registerTestSPIRVCPURunnerPipeline();
+void registerTestSPIRVFuncSignatureConversion();
+void registerTestSPIRVVectorUnrolling();
+void registerTestTensorCopyInsertionPass();
+void registerTestTensorLikeAndBufferLikePass();
+void registerTestTensorTransforms();
+void registerTestTopologicalSortAnalysisPass();
+void registerTestTransformDialectEraseSchedulePass();
+void registerTestPassStateExtensionCommunication();
+void registerTestVectorLowerings();
+void registerTestVectorReductionToSPIRVDotProd();
+void registerTestVulkanRunnerPipeline();
+void registerTestWrittenToPass();
+void registerTestXeGPULowerings();
+#if MLIR_ENABLE_PDL_IN_PATTERNMATCH
+void registerTestDialectConversionPasses();
+void registerTestPDLByteCodePass();
+void registerTestPDLLPasses();
+#endif
+} // namespace test
+} // namespace mlir
 
-static cl::opt<bool>
-    splitInputFile("split-input-file",
-                   cl::desc("Split the input file into pieces and process each "
-                            "chunk independently"),
-                   cl::init(false));
+namespace test {
+void registerTestDialect(DialectRegistry &);
+void registerTestDynDialect(DialectRegistry &);
+void registerTestTilingInterfaceTransformDialectExtension(DialectRegistry &);
+void registerTestTransformDialectExtension(DialectRegistry &);
+void registerIrdlTestDialect(DialectRegistry &);
+void registerTestTransformsTransformDialectExtension(DialectRegistry &);
+} // namespace test
 
-static cl::opt<bool>
-    verifyDiagnostics("verify",
-                      cl::desc("Check that emitted diagnostics match "
-                               "expected-* lines on the corresponding line"),
-                      cl::init(false));
+#ifdef MLIR_INCLUDE_TESTS
+void registerTestPasses() {
+  registerCloneTestPasses();
+  registerConvertToTargetEnvPass();
+  registerPrintTosaAvailabilityPass();
+  registerLazyLoadingTestPasses();
+  registerLoopLikeInterfaceTestPasses();
+  registerPassManagerTestPass();
+  registerPrintSpirvAvailabilityPass();
+  registerRegionTestPasses();
+  registerShapeFunctionTestPasses();
+  registerSideEffectTestPasses();
+  registerSliceAnalysisTestPass();
+  registerSymbolTestPasses();
+  registerTestAffineAccessAnalysisPass();
+  registerTestAffineDataCopyPass();
+  registerTestAffineLoopUnswitchingPass();
+  registerTestAffineReifyValueBoundsPass();
+  registerTestAffineWalk();
+  registerTestBytecodeRoundtripPasses();
+  registerTestDecomposeAffineOpPass();
+  registerTestFunc();
+  registerTestGpuLoweringPasses();
+  registerTestGpuMemoryPromotionPass();
+  registerTestLoopPermutationPass();
+  registerTestMatchers();
+  registerTestOperationEqualPass();
+  registerTestPreserveUseListOrders();
+  registerTestPrintDefUsePass();
+  registerTestPrintInvalidPass();
+  registerTestPrintNestingPass();
+  registerTestReducer();
+  registerTestSpirvEntryPointABIPass();
+  registerTestSpirvModuleCombinerPass();
+  registerTestTraitsPass();
+  registerTosaTestQuantUtilAPIPass();
+  registerVectorizerTestPass();
 
-static std::vector<const mlir::PassInfo *> *passList;
-
-enum OptResult { OptSuccess, OptFailure };
-
-/// Open the specified output file and return it, exiting if there is any I/O or
-/// other errors.
-static std::unique_ptr<ToolOutputFile> getOutputStream() {
-  std::error_code error;
-  auto result =
-      llvm::make_unique<ToolOutputFile>(outputFilename, error, sys::fs::F_None);
-  if (error) {
-    llvm::errs() << error.message() << '\n';
-    exit(1);
-  }
-
-  return result;
+  mlir::test::registerCommutativityUtils();
+  mlir::test::registerConvertCallOpPass();
+  mlir::test::registerConvertFuncOpPass();
+  mlir::test::registerInliner();
+  mlir::test::registerInlinerCallback();
+  mlir::test::registerMemRefBoundCheck();
+  mlir::test::registerPatternsTestPass();
+  mlir::test::registerSimpleParametricTilingPass();
+  mlir::test::registerTestAffineLoopParametricTilingPass();
+  mlir::test::registerTestAliasAnalysisPass();
+  mlir::test::registerTestArithEmulateWideIntPass();
+  mlir::test::registerTestBuiltinAttributeInterfaces();
+  mlir::test::registerTestBuiltinDistinctAttributes();
+  mlir::test::registerTestCallGraphPass();
+  mlir::test::registerTestCfAssertPass();
+  mlir::test::registerTestCFGLoopInfoPass();
+  mlir::test::registerTestComposeSubView();
+  mlir::test::registerTestCompositePass();
+  mlir::test::registerTestControlFlowSink();
+  mlir::test::registerTestConvertToSPIRVPass();
+  mlir::test::registerTestDataLayoutPropagation();
+  mlir::test::registerTestDataLayoutQuery();
+  mlir::test::registerTestDeadCodeAnalysisPass();
+  mlir::test::registerTestDecomposeCallGraphTypes();
+  mlir::test::registerTestDiagnosticsPass();
+  mlir::test::registerTestDiagnosticsMetadataPass();
+  mlir::test::registerTestDominancePass();
+  mlir::test::registerTestDynamicPipelinePass();
+  mlir::test::registerTestEmulateNarrowTypePass();
+  mlir::test::registerTestExpandMathPass();
+  mlir::test::registerTestFooAnalysisPass();
+  mlir::test::registerTestComposeSubView();
+  mlir::test::registerTestMultiBuffering();
+  mlir::test::registerTestIRVisitorsPass();
+  mlir::test::registerTestGenericIRVisitorsPass();
+  mlir::test::registerTestInterfaces();
+  mlir::test::registerTestIrdlTestDialectConversionPass();
+  mlir::test::registerTestIRVisitorsPass();
+  mlir::test::registerTestLastModifiedPass();
+  mlir::test::registerTestLinalgDecomposeOps();
+  mlir::test::registerTestLinalgDropUnitDims();
+  mlir::test::registerTestLinalgElementwiseFusion();
+  mlir::test::registerTestLinalgGreedyFusion();
+  mlir::test::registerTestLinalgRankReduceContractionOps();
+  mlir::test::registerTestLinalgTransforms();
+  mlir::test::registerTestLivenessAnalysisPass();
+  mlir::test::registerTestLivenessPass();
+  mlir::test::registerTestLLVMLegalizePatternsPass();
+  mlir::test::registerTestLoopFusion();
+  mlir::test::registerTestLoopMappingPass();
+  mlir::test::registerTestLoopUnrollingPass();
+  mlir::test::registerTestLowerToArmSME();
+  mlir::test::registerTestLowerToLLVM();
+  mlir::test::registerTestMakeIsolatedFromAbovePass();
+  mlir::test::registerTestMatchReductionPass();
+  mlir::test::registerTestMathAlgebraicSimplificationPass();
+  mlir::test::registerTestMathPolynomialApproximationPass();
+  mlir::test::registerTestMathToVCIXPass();
+  mlir::test::registerTestMemRefDependenceCheck();
+  mlir::test::registerTestMemRefStrideCalculation();
+  mlir::test::registerTestMemRefToLLVMWithTransforms();
+  mlir::test::registerTestMeshReshardingSpmdizationPass();
+  mlir::test::registerTestMeshSimplificationsPass();
+  mlir::test::registerTestMultiBuffering();
+  mlir::test::registerTestNextAccessPass();
+  mlir::test::registerTestNVGPULowerings();
+  mlir::test::registerTestOpaqueLoc();
+  mlir::test::registerTestOpLoweringPasses();
+  mlir::test::registerTestPadFusion();
+  mlir::test::registerTestRecursiveTypesPass();
+  mlir::test::registerTestSCFUpliftWhileToFor();
+  mlir::test::registerTestSCFUtilsPass();
+  mlir::test::registerTestSCFWhileOpBuilderPass();
+  mlir::test::registerTestSCFWrapInZeroTripCheckPasses();
+  mlir::test::registerTestShapeMappingPass();
+  mlir::test::registerTestSingleFold();
+  mlir::test::registerTestSliceAnalysisPass();
+  mlir::test::registerTestSPIRVCPURunnerPipeline();
+  mlir::test::registerTestSPIRVFuncSignatureConversion();
+  mlir::test::registerTestSPIRVVectorUnrolling();
+  mlir::test::registerTestTensorCopyInsertionPass();
+  mlir::test::registerTestTensorLikeAndBufferLikePass();
+  mlir::test::registerTestTensorTransforms();
+  mlir::test::registerTestTopologicalSortAnalysisPass();
+  mlir::test::registerTestTransformDialectEraseSchedulePass();
+  mlir::test::registerTestPassStateExtensionCommunication();
+  mlir::test::registerTestVectorLowerings();
+  mlir::test::registerTestVectorReductionToSPIRVDotProd();
+  mlir::test::registerTestVulkanRunnerPipeline();
+  mlir::test::registerTestWrittenToPass();
+  mlir::test::registerTestXeGPULowerings();
+#if MLIR_ENABLE_PDL_IN_PATTERNMATCH
+  mlir::test::registerTestDialectConversionPasses();
+  mlir::test::registerTestPDLByteCodePass();
+  mlir::test::registerTestPDLLPasses();
+#endif
 }
-
-/// Given a MemoryBuffer along with a line and column within it, return the
-/// location being referenced.
-static SMLoc getLocFromLineAndCol(MemoryBuffer &membuf, unsigned lineNo,
-                                  unsigned columnNo) {
-  // TODO: This should really be upstreamed to be a method on llvm::SourceMgr.
-  // Doing so would allow it to use the offset cache that is already maintained
-  // by SrcBuffer, making this more efficient.
-
-  // Scan for the correct line number.
-  const char *position = membuf.getBufferStart();
-  const char *end = membuf.getBufferEnd();
-
-  // We start counting line and column numbers from 1.
-  --lineNo;
-  --columnNo;
-
-  while (position < end && lineNo) {
-    auto curChar = *position++;
-
-    // Scan for newlines.  If this isn't one, ignore it.
-    if (curChar != '\r' && curChar != '\n')
-      continue;
-
-    // We saw a line break, decrement our counter.
-    --lineNo;
-
-    // Check for \r\n and \n\r and treat it as a single escape.  We know that
-    // looking past one character is safe because MemoryBuffer's are always nul
-    // terminated.
-    if (*position != curChar && (*position == '\r' || *position == '\n'))
-      ++position;
-  }
-
-  // If the line/column counter was invalid, return a pointer to the start of
-  // the buffer.
-  if (lineNo || position + columnNo > end)
-    return SMLoc::getFromPointer(membuf.getBufferStart());
-
-  // Otherwise return the right pointer.
-  return SMLoc::getFromPointer(position + columnNo);
-}
-
-/// Perform the actions on the input file indicated by the command line flags
-/// within the specified context.
-///
-/// This typically parses the main source file, runs zero or more optimization
-/// passes, then prints the output.
-///
-static OptResult performActions(SourceMgr &sourceMgr, MLIRContext *context) {
-  std::unique_ptr<Module> module(parseSourceFile(sourceMgr, context));
-  if (!module)
-    return OptFailure;
-
-  // Run each of the passes that were selected.
-  for (const auto *passInfo : *passList) {
-    std::unique_ptr<Pass> pass(passInfo->createPass());
-    PassResult result = pass->runOnModule(module.get());
-    if (result)
-      return OptFailure;
-
-    // Verify that the result of the pass is still valid.
-    if (module->verify())
-      return OptFailure;
-  }
-
-  // Print the output.
-  auto output = getOutputStream();
-  module->print(output->os());
-  output->keep();
-  return OptSuccess;
-}
-
-/// Given a diagnostic kind, return a human readable string for it.
-static StringRef getDiagnosticKindString(MLIRContext::DiagnosticKind kind) {
-  switch (kind) {
-  case MLIRContext::DiagnosticKind::Note:
-    return "note";
-  case MLIRContext::DiagnosticKind::Warning:
-    return "warning";
-  case MLIRContext::DiagnosticKind::Error:
-    return "error";
-  }
-}
-
-/// Given a diagnostic kind, returns the LLVM DiagKind.
-static llvm::SourceMgr::DiagKind getDiagKind(MLIRContext::DiagnosticKind kind) {
-  switch (kind) {
-  case MLIRContext::DiagnosticKind::Note:
-    return llvm::SourceMgr::DK_Note;
-  case MLIRContext::DiagnosticKind::Warning:
-    return llvm::SourceMgr::DK_Warning;
-  case MLIRContext::DiagnosticKind::Error:
-    return llvm::SourceMgr::DK_Error;
-  }
-}
-
-/// Parses the memory buffer.  If successfully, run a series of passes against
-/// it and print the result.
-static OptResult processFile(std::unique_ptr<MemoryBuffer> ownedBuffer) {
-  // Tell sourceMgr about this buffer, which is what the parser will pick up.
-  SourceMgr sourceMgr;
-  auto &buffer = *ownedBuffer;
-  sourceMgr.AddNewSourceBuffer(std::move(ownedBuffer), SMLoc());
-
-  // Parse the input file.
-  MLIRContext context;
-
-  // If we are in verify mode then we have a lot of work to do, otherwise just
-  // perform the actions without worrying about it.
-  if (!verifyDiagnostics) {
-
-    // Register a simple diagnostic handler that prints out info with context.
-    context.registerDiagnosticHandler([&](Location location, StringRef message,
-                                          MLIRContext::DiagnosticKind kind) {
-      unsigned line = 1, column = 1;
-      SMLoc loc;
-      if (auto fileLoc = location.dyn_cast<FileLineColLoc>()) {
-        line = fileLoc->getLine();
-        column = fileLoc->getColumn();
-        loc = getLocFromLineAndCol(buffer, line, column);
-      }
-
-      sourceMgr.PrintMessage(loc, getDiagKind(kind), message);
-    });
-
-    // Run the test actions.
-    return performActions(sourceMgr, &context);
-  }
-
-  // Keep track of the result of this file processing.  If there are no issues,
-  // then we succeed.
-  auto result = OptSuccess;
-
-  // Record the expected diagnostic's position, substring and whether it was
-  // seen.
-  struct ExpectedDiag {
-    MLIRContext::DiagnosticKind kind;
-    unsigned lineNo;
-    StringRef substring;
-    SMLoc fileLoc;
-    bool matched = false;
-  };
-  SmallVector<ExpectedDiag, 2> expectedDiags;
-
-  // Error checker that verifies reported error was expected.
-  auto checker = [&](Location location, StringRef message,
-                     MLIRContext::DiagnosticKind kind) {
-    unsigned line = 1, column = 1;
-    if (auto fileLoc = location.dyn_cast<FileLineColLoc>()) {
-      line = fileLoc->getLine();
-      column = fileLoc->getColumn();
-    }
-
-    // If we find something that is close then emit a more specific error.
-    ExpectedDiag *nearMiss = nullptr;
-
-    // If this was an expected error, remember that we saw it and return.
-    for (auto &e : expectedDiags) {
-      if (line == e.lineNo && message.contains(e.substring)) {
-        if (e.kind == kind) {
-          e.matched = true;
-          return;
-        }
-
-        // If this only differs based on the diagnostic kind, then consider it
-        // to be a near miss.
-        nearMiss = &e;
-      }
-    }
-
-    // If there was a near miss, emit a specific diagnostic.
-    if (nearMiss) {
-      sourceMgr.PrintMessage(nearMiss->fileLoc, SourceMgr::DK_Error,
-                             "'" + getDiagnosticKindString(kind) +
-                                 "' diagnostic emitted when expecting a '" +
-                                 getDiagnosticKindString(nearMiss->kind) + "'");
-      result = OptFailure;
-      return;
-    }
-
-    // If this error wasn't expected, produce an error out of mlir-opt saying
-    // so.
-    auto unexpectedLoc = getLocFromLineAndCol(buffer, line, column);
-    sourceMgr.PrintMessage(unexpectedLoc, SourceMgr::DK_Error,
-                           "unexpected error: " + Twine(message));
-    result = OptFailure;
-  };
-
-  // Scan the file for expected-* designators and register a callback for the
-  // error handler.
-  // Extract the expected errors from the file.
-  llvm::Regex expected(
-      "expected-(error|note|warning) *(@[+-][0-9]+)? *{{(.*)}}");
-  SmallVector<StringRef, 100> lines;
-  buffer.getBuffer().split(lines, '\n');
-  for (unsigned lineNo = 0, e = lines.size(); lineNo < e; ++lineNo) {
-    SmallVector<StringRef, 3> matches;
-    if (expected.match(lines[lineNo], &matches)) {
-      // Point to the start of expected-*.
-      SMLoc expectedStart = SMLoc::getFromPointer(matches[0].data());
-
-      MLIRContext::DiagnosticKind kind;
-      if (matches[1] == "error")
-        kind = MLIRContext::DiagnosticKind::Error;
-      else if (matches[1] == "warning")
-        kind = MLIRContext::DiagnosticKind::Warning;
-      else {
-        assert(matches[1] == "note");
-        kind = MLIRContext::DiagnosticKind::Note;
-      }
-
-      ExpectedDiag record{kind, lineNo + 1, matches[3], expectedStart, false};
-      auto offsetMatch = matches[2];
-      if (!offsetMatch.empty()) {
-        int offset;
-        // Get the integer value without the @ and +/- prefix.
-        if (!offsetMatch.drop_front(2).getAsInteger(0, offset)) {
-          if (offsetMatch[1] == '+')
-            record.lineNo += offset;
-          else
-            record.lineNo -= offset;
-        }
-      }
-      expectedDiags.push_back(record);
-    }
-  }
-
-  // Finally, register the error handler to capture them.
-  context.registerDiagnosticHandler(checker);
-
-  // Do any processing requested by command line flags.  We don't care whether
-  // these actions succeed or fail, we only care what diagnostics they produce
-  // and whether they match our expectations.
-  performActions(sourceMgr, &context);
-
-  // Verify that all expected errors were seen.
-  for (auto &err : expectedDiags) {
-    if (!err.matched) {
-      SMRange range(err.fileLoc,
-                    SMLoc::getFromPointer(err.fileLoc.getPointer() +
-                                          err.substring.size()));
-      auto kind = getDiagnosticKindString(err.kind);
-      sourceMgr.PrintMessage(err.fileLoc, SourceMgr::DK_Error,
-                             "expected " + kind + " \"" + err.substring +
-                                 "\" was not produced",
-                             range);
-      result = OptFailure;
-    }
-  }
-
-  return result;
-}
-
-/// Split the specified file on a marker and process each chunk independently
-/// according to the normal processFile logic.  This is primarily used to
-/// allow a large number of small independent parser tests to be put into a
-/// single test, but could be used for other purposes as well.
-static OptResult
-splitAndProcessFile(std::unique_ptr<MemoryBuffer> originalBuffer) {
-  const char marker[] = "// -----\n";
-  auto *origMemBuffer = originalBuffer.get();
-  SmallVector<StringRef, 8> sourceBuffers;
-  origMemBuffer->getBuffer().split(sourceBuffers, marker);
-
-  // Add the original buffer to the source manager.
-  SourceMgr fileSourceMgr;
-  fileSourceMgr.AddNewSourceBuffer(std::move(originalBuffer), SMLoc());
-
-  bool hadUnexpectedResult = false;
-
-  // Process each chunk in turn.  If any fails, then return a failure of the
-  // tool.
-  for (auto &subBuffer : sourceBuffers) {
-    auto splitLoc = SMLoc::getFromPointer(subBuffer.data());
-    unsigned splitLine = fileSourceMgr.getLineAndColumn(splitLoc).first;
-    auto subMemBuffer = MemoryBuffer::getMemBufferCopy(
-        subBuffer, origMemBuffer->getBufferIdentifier() +
-                       Twine(" split at line #") + Twine(splitLine));
-    if (processFile(std::move(subMemBuffer)))
-      hadUnexpectedResult = true;
-  }
-
-  return hadUnexpectedResult ? OptFailure : OptSuccess;
-}
+#endif
 
 int main(int argc, char **argv) {
-  llvm::PrettyStackTraceProgram x(argc, argv);
-  InitLLVM y(argc, argv);
+  registerAllPasses();
+#ifdef MLIR_INCLUDE_TESTS
+  registerTestPasses();
+#endif
+  DialectRegistry registry;
+  registerAllDialects(registry);
+  registerAllExtensions(registry);
 
-  // Parse pass names in main to ensure static initialization completed.
-  llvm::cl::list<const mlir::PassInfo *, bool, mlir::PassNameParser> passList(
-      "", llvm::cl::desc("Compiler passes to run"));
-  ::passList = &passList;
-  cl::ParseCommandLineOptions(argc, argv, "MLIR modular optimizer driver\n");
+  // TODO: Remove this and the corresponding MLIRToLLVMIRTranslationRegistration
+  // cmake dependency when a safe dialect interface registration mechanism is
+  // implemented, see D157703 (and corresponding note on the declaration).
+  registerAllGPUToLLVMIRTranslations(registry);
 
-  // Set up the input file.
-  auto fileOrErr = MemoryBuffer::getFileOrSTDIN(inputFilename);
-  if (std::error_code error = fileOrErr.getError()) {
-    llvm::errs() << argv[0] << ": could not open input file '" << inputFilename
-                 << "': " << error.message() << "\n";
-    return 1;
-  }
-
-  // The split-input-file mode is a very specific mode that slices the file
-  // up into small pieces and checks each independently.
-  if (splitInputFile)
-    return splitAndProcessFile(std::move(*fileOrErr));
-
-  return processFile(std::move(*fileOrErr));
+#ifdef MLIR_INCLUDE_TESTS
+  ::test::registerIrdlTestDialect(registry);
+  ::test::registerTestDialect(registry);
+  ::test::registerTestDynDialect(registry);
+  ::test::registerTestTilingInterfaceTransformDialectExtension(registry);
+  ::test::registerTestTransformDialectExtension(registry);
+  ::test::registerTestTransformsTransformDialectExtension(registry);
+#endif
+  return mlir::asMainReturnCode(mlir::MlirOptMain(
+      argc, argv, "MLIR modular optimizer driver\n", registry));
 }

@@ -1,19 +1,10 @@
 //===- AffineMapDetail.h - MLIR Affine Map details Class --------*- C++ -*-===//
 //
-// Copyright 2019 The MLIR Authors.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 //
 // This holds implementation details of AffineMap.
 //
@@ -24,25 +15,55 @@
 
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/AffineMap.h"
+#include "mlir/Support/StorageUniquer.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/Support/TrailingObjects.h"
 
 namespace mlir {
 namespace detail {
 
-struct AffineMapStorage {
+struct AffineMapStorage final
+    : public StorageUniquer::BaseStorage,
+      private llvm::TrailingObjects<AffineMapStorage, AffineExpr> {
+  friend llvm::TrailingObjects<AffineMapStorage, AffineExpr>;
+
+  /// The hash key used for uniquing.
+  using KeyTy = std::tuple<unsigned, unsigned, ArrayRef<AffineExpr>>;
+
   unsigned numDims;
   unsigned numSymbols;
+  unsigned numResults;
+
+  MLIRContext *context;
 
   /// The affine expressions for this (multi-dimensional) map.
-  /// TODO: use trailing objects for this.
-  ArrayRef<AffineExpr> results;
+  ArrayRef<AffineExpr> results() const {
+    return getTrailingObjects(numResults);
+  }
 
-  /// The extents along each of the range dimensions if the map is bounded,
-  /// nullptr otherwise.
-  ArrayRef<AffineExpr> rangeSizes;
+  bool operator==(const KeyTy &key) const {
+    return std::get<0>(key) == numDims && std::get<1>(key) == numSymbols &&
+           std::get<2>(key) == results();
+  }
+
+  // Constructs an AffineMapStorage from a key. The context must be set by the
+  // caller.
+  static AffineMapStorage *
+  construct(StorageUniquer::StorageAllocator &allocator, const KeyTy &key) {
+    auto results = std::get<2>(key);
+    auto byteSize =
+        AffineMapStorage::totalSizeToAlloc<AffineExpr>(results.size());
+    auto *rawMem = allocator.allocate(byteSize, alignof(AffineMapStorage));
+    auto *res = new (rawMem) AffineMapStorage();
+    res->numDims = std::get<0>(key);
+    res->numSymbols = std::get<1>(key);
+    res->numResults = results.size();
+    llvm::uninitialized_copy(results, res->getTrailingObjects());
+    return res;
+  }
 };
 
-} // end namespace detail
-} // end namespace mlir
+} // namespace detail
+} // namespace mlir
 
 #endif // AFFINEMAPDETAIL_H_

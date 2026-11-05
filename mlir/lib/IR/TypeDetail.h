@@ -1,19 +1,10 @@
-//===- TypeDetail.h - MLIR Affine Expr storage details ----------*- C++ -*-===//
+//===- TypeDetail.h - MLIR Type storage details -----------------*- C++ -*-===//
 //
-// Copyright 2019 The MLIR Authors.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 //
 // This holds implementation details of Type.
 //
@@ -21,108 +12,143 @@
 #ifndef TYPEDETAIL_H_
 #define TYPEDETAIL_H_
 
+#include "mlir/IR/AffineMap.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/MLIRContext.h"
-#include "mlir/IR/Types.h"
+#include "mlir/IR/OperationSupport.h"
+#include "mlir/IR/TypeRange.h"
+#include "llvm/ADT/bit.h"
+#include "llvm/Support/TrailingObjects.h"
 
 namespace mlir {
 
-class AffineMap;
-class MLIRContext;
-
 namespace detail {
 
-/// Base storage class appearing in a Type.
-struct alignas(8) TypeStorage {
-  TypeStorage(Type::Kind kind, MLIRContext *context)
-      : context(context), kind(kind), subclassData(0) {}
-  TypeStorage(Type::Kind kind, MLIRContext *context, unsigned subclassData)
-      : context(context), kind(kind), subclassData(subclassData) {}
+/// Integer Type Storage and Uniquing.
+struct IntegerTypeStorage : public TypeStorage {
+  IntegerTypeStorage(unsigned width,
+                     IntegerType::SignednessSemantics signedness)
+      : width(width), signedness(signedness) {}
 
-  unsigned getSubclassData() const { return subclassData; }
+  /// The hash key used for uniquing.
+  using KeyTy = std::tuple<unsigned, IntegerType::SignednessSemantics>;
 
-  void setSubclassData(unsigned val) {
-    subclassData = val;
-    // Ensure we don't have any accidental truncation.
-    assert(getSubclassData() == val && "Subclass data too large for field");
+  static llvm::hash_code hashKey(const KeyTy &key) {
+    return llvm::hash_value(key);
   }
 
-  /// This refers to the MLIRContext in which this type was uniqued.
-  MLIRContext *const context;
+  bool operator==(const KeyTy &key) const {
+    return KeyTy(width, signedness) == key;
+  }
 
-  /// Classification of the subclass, used for type checking.
-  Type::Kind kind : 8;
+  static IntegerTypeStorage *construct(TypeStorageAllocator &allocator,
+                                       KeyTy key) {
+    return new (allocator.allocate<IntegerTypeStorage>())
+        IntegerTypeStorage(std::get<0>(key), std::get<1>(key));
+  }
 
-  /// Space for subclasses to store data.
-  unsigned subclassData : 24;
+  KeyTy getAsKey() const { return KeyTy(width, signedness); }
+
+  unsigned width : 30;
+  IntegerType::SignednessSemantics signedness : 2;
 };
 
-struct IndexTypeStorage : public TypeStorage {};
-
-struct IntegerTypeStorage : public TypeStorage {
-  unsigned width;
-};
-
-struct FloatTypeStorage : public TypeStorage {};
-
-struct OtherTypeStorage : public TypeStorage {};
-
+/// Function Type Storage and Uniquing.
 struct FunctionTypeStorage : public TypeStorage {
+  FunctionTypeStorage(unsigned numInputs, unsigned numResults,
+                      Type const *inputsAndResults)
+      : numInputs(numInputs), numResults(numResults),
+        inputsAndResults(inputsAndResults) {}
+
+  /// The hash key used for uniquing.
+  using KeyTy = std::tuple<TypeRange, TypeRange>;
+  bool operator==(const KeyTy &key) const {
+    if (std::get<0>(key) == getInputs())
+      return std::get<1>(key) == getResults();
+    return false;
+  }
+
+  /// Construction.
+  static FunctionTypeStorage *construct(TypeStorageAllocator &allocator,
+                                        const KeyTy &key) {
+    auto [inputs, results] = key;
+
+    // Copy the inputs and results into the bump pointer.
+    SmallVector<Type, 16> types;
+    types.reserve(inputs.size() + results.size());
+    types.append(inputs.begin(), inputs.end());
+    types.append(results.begin(), results.end());
+    auto typesList = allocator.copyInto(ArrayRef<Type>(types));
+
+    // Initialize the memory using placement new.
+    return new (allocator.allocate<FunctionTypeStorage>())
+        FunctionTypeStorage(inputs.size(), results.size(), typesList.data());
+  }
+
   ArrayRef<Type> getInputs() const {
-    return ArrayRef<Type>(inputsAndResults, subclassData);
+    return ArrayRef<Type>(inputsAndResults, numInputs);
   }
   ArrayRef<Type> getResults() const {
-    return ArrayRef<Type>(inputsAndResults + subclassData, numResults);
+    return ArrayRef<Type>(inputsAndResults + numInputs, numResults);
   }
 
+  KeyTy getAsKey() const { return KeyTy(getInputs(), getResults()); }
+
+  unsigned numInputs;
   unsigned numResults;
   Type const *inputsAndResults;
 };
 
-struct VectorOrTensorTypeStorage : public TypeStorage {
-  Type elementType;
-};
+/// A type representing a collection of other types.
+struct TupleTypeStorage final
+    : public TypeStorage,
+      private llvm::TrailingObjects<TupleTypeStorage, Type> {
+  friend llvm::TrailingObjects<TupleTypeStorage, Type>;
+  using KeyTy = TypeRange;
 
-struct VectorTypeStorage : public VectorOrTensorTypeStorage {
-  ArrayRef<int> getShape() const {
-    return ArrayRef<int>(shapeElements, getSubclassData());
+  TupleTypeStorage(unsigned numTypes) : numElements(numTypes) {}
+
+  /// Construction.
+  static TupleTypeStorage *construct(TypeStorageAllocator &allocator,
+                                     TypeRange key) {
+    // Allocate a new storage instance.
+    auto byteSize = TupleTypeStorage::totalSizeToAlloc<Type>(key.size());
+    auto *rawMem = allocator.allocate(byteSize, alignof(TupleTypeStorage));
+    auto *result = ::new (rawMem) TupleTypeStorage(key.size());
+
+    // Copy in the element types into the trailing storage.
+    llvm::uninitialized_copy(key, result->getTrailingObjects());
+    return result;
   }
 
-  const int *shapeElements;
+  bool operator==(const KeyTy &key) const { return key == getTypes(); }
+
+  /// Return the number of held types.
+  unsigned size() const { return numElements; }
+
+  /// Return the held types.
+  ArrayRef<Type> getTypes() const { return getTrailingObjects(size()); }
+
+  KeyTy getAsKey() const { return getTypes(); }
+
+  /// The number of tuple elements.
+  unsigned numElements;
 };
 
-struct TensorTypeStorage : public VectorOrTensorTypeStorage {};
+/// Checks if the memorySpace has supported Attribute type.
+bool isSupportedMemorySpace(Attribute memorySpace);
 
-struct RankedTensorTypeStorage : public TensorTypeStorage {
-  ArrayRef<int> getShape() const {
-    return ArrayRef<int>(shapeElements, getSubclassData());
-  }
+/// Wraps deprecated integer memory space to the new Attribute form.
+Attribute wrapIntegerMemorySpace(unsigned memorySpace, MLIRContext *ctx);
 
-  const int *shapeElements;
-};
+/// Replaces default memorySpace (integer == `0`) with empty Attribute.
+Attribute skipDefaultMemorySpace(Attribute memorySpace);
 
-struct UnrankedTensorTypeStorage : public TensorTypeStorage {};
-
-struct MemRefTypeStorage : public TypeStorage {
-  ArrayRef<int> getShape() const {
-    return ArrayRef<int>(shapeElements, getSubclassData());
-  }
-
-  ArrayRef<AffineMap> getAffineMaps() const {
-    return ArrayRef<AffineMap>(affineMapList, numAffineMaps);
-  }
-
-  /// The type of each scalar element of the memref.
-  Type elementType;
-  /// An array of integers which stores the shape dimension sizes.
-  const int *shapeElements;
-  /// The number of affine maps in the 'affineMapList' array.
-  const unsigned numAffineMaps;
-  /// List of affine maps in the memref's layout/index map composition.
-  AffineMap const *affineMapList;
-  /// Memory space in which data referenced by memref resides.
-  const unsigned memorySpace;
-};
+/// [deprecated] Returns the memory space in old raw integer representation.
+/// New `Attribute getMemorySpace()` method should be used instead.
+unsigned getMemorySpaceAsInt(Attribute memorySpace);
 
 } // namespace detail
 } // namespace mlir
+
 #endif // TYPEDETAIL_H_

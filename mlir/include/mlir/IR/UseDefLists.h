@@ -1,19 +1,10 @@
 //===- UseDefLists.h --------------------------------------------*- C++ -*-===//
 //
-// Copyright 2019 The MLIR Authors.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 //
 // This file defines generic use/def list machinery and manipulation utilities.
 //
@@ -28,157 +19,71 @@
 
 namespace mlir {
 
-class IROperand;
-class IROperandOwner;
-template <typename OperandType, typename OwnerType> class SSAValueUseIterator;
+class Operation;
+template <typename OperandType>
+class ValueUseIterator;
+template <typename UseIteratorT, typename OperandType>
+class ValueUserIterator;
 
-class IRObjectWithUseList {
+//===----------------------------------------------------------------------===//
+// IROperand
+//===----------------------------------------------------------------------===//
+
+namespace detail {
+/// This class is the base for IROperand, and provides all of the non-templated
+/// facilities for operand use management.
+class IROperandBase {
 public:
-  ~IRObjectWithUseList() {
-    assert(use_empty() && "Cannot destroy a value that still has uses!");
-  }
-
-  /// Returns true if this value has no uses.
-  bool use_empty() const { return firstUse == nullptr; }
-
-  /// Returns true if this value has exactly one use.
-  inline bool hasOneUse() const;
-
-  using use_iterator = SSAValueUseIterator<IROperand, IROperandOwner>;
-  using use_range = llvm::iterator_range<use_iterator>;
-
-  inline use_iterator use_begin() const;
-  inline use_iterator use_end() const;
-
-  /// Returns a range of all uses, which is useful for iterating over all uses.
-  inline use_range getUses() const;
-
-  /// Replace all uses of 'this' value with the new value, updating anything in
-  /// the IR that uses 'this' to use the other value instead.  When this returns
-  /// there are zero uses of 'this'.
-  void replaceAllUsesWith(IRObjectWithUseList *newValue);
-
-protected:
-  IRObjectWithUseList() {}
-
-  /// Return the first IROperand that is using this value, for use by custom
-  /// use/def iterators.
-  IROperand *getFirstUse() { return firstUse; }
-  const IROperand *getFirstUse() const { return firstUse; }
-
-private:
-  friend class IROperand;
-  IROperand *firstUse = nullptr;
-};
-
-/// Subclasses of IROperandOwner can be the owner of an IROperand.  In practice
-/// this is the common base between Instruction and Statement.
-class IROperandOwner {
-public:
-  enum class Kind {
-    OperationStmt,
-    ForStmt,
-    IfStmt,
-    Instruction,
-
-    /// These enums define ranges used for classof implementations.
-    STMT_LAST = IfStmt,
-  };
-
-  Kind getKind() const { return locationAndKind.getInt(); }
-
-  /// The source location the operation was defined or derived from.
-  Location getLoc() const { return locationAndKind.getPointer(); }
-
-  /// Set the source location the operation was defined or derived from.
-  void setLoc(Location loc) { locationAndKind.setPointer(loc); }
-
-  /// Return the context this operation is associated with.
-  MLIRContext *getContext() const;
-
-protected:
-  IROperandOwner(Kind kind, Location location)
-      : locationAndKind(location, kind) {}
-
-private:
-  /// This holds information about the source location the operation was defined
-  /// or derived from, along with the kind of subclass this is.
-  llvm::PointerIntPair<Location, 3, Kind> locationAndKind;
-};
-
-/// A reference to a value, suitable for use as an operand of an instruction,
-/// statement, etc.
-class IROperand {
-public:
-  IROperand(IROperandOwner *owner) : owner(owner) {}
-  IROperand(IROperandOwner *owner, IRObjectWithUseList *value)
-      : value(value), owner(owner) {
-    insertIntoCurrent();
-  }
-
-  /// Return the current value being used by this operand.
-  IRObjectWithUseList *get() const { return value; }
-
-  /// Set the current value being used by this operand.
-  void set(IRObjectWithUseList *newValue) {
-    // It isn't worth optimizing for the case of switching operands on a single
-    // value.
-    removeFromCurrent();
-    value = newValue;
-    insertIntoCurrent();
-  }
-
-  /// Return the owner of this operand, for example, the OperationStmt that
-  /// contains a StmtOperand.
-  IROperandOwner *getOwner() { return owner; }
-  const IROperandOwner *getOwner() const { return owner; }
-
-  /// \brief Remove this use of the operand.
-  void drop() {
-    removeFromCurrent();
-    value = nullptr;
-    nextUse = nullptr;
-    back = nullptr;
-  }
-
-  ~IROperand() { removeFromCurrent(); }
+  /// Return the owner of this operand.
+  Operation *getOwner() const { return owner; }
 
   /// Return the next operand on the use-list of the value we are referring to.
   /// This should generally only be used by the internal implementation details
   /// of the SSA machinery.
-  IROperand *getNextOperandUsingThisValue() { return nextUse; }
+  IROperandBase *getNextOperandUsingThisValue() { return nextUse; }
 
-  /// We support a move constructor so IROperand's can be in vectors, but this
-  /// shouldn't be used by general clients.
-  IROperand(IROperand &&other) : owner(other.owner) {
+  /// Initialize the use-def chain by setting the back address to self and
+  /// nextUse to nullptr.
+  void initChainWithUse(IROperandBase **self) {
+    assert(this == *self);
+    back = self;
+    nextUse = nullptr;
+  }
+
+  /// Link the current node to next.
+  void linkTo(IROperandBase *next) {
+    nextUse = next;
+    if (nextUse)
+      nextUse->back = &nextUse;
+  }
+
+protected:
+  IROperandBase(Operation *owner) : owner(owner) {}
+  IROperandBase(IROperandBase &&other) : owner(other.owner) {
+    *this = std::move(other);
+  }
+  IROperandBase &operator=(IROperandBase &&other) {
+    removeFromCurrent();
     other.removeFromCurrent();
-    value = other.value;
-    other.value = nullptr;
     other.back = nullptr;
     nextUse = nullptr;
     back = nullptr;
-    insertIntoCurrent();
+    return *this;
+  }
+  /// Operands are not copyable or assignable.
+  IROperandBase(const IROperandBase &use) = delete;
+  IROperandBase &operator=(const IROperandBase &use) = delete;
+
+  ~IROperandBase() { removeFromCurrent(); }
+
+  /// Remove this use of the operand.
+  void drop() {
+    removeFromCurrent();
+    nextUse = nullptr;
+    back = nullptr;
   }
 
-private:
-  /// The value used as this operand.  This can be null when in a
-  /// "dropAllUses" state.
-  IRObjectWithUseList *value = nullptr;
-
-  /// The next operand in the use-chain.
-  IROperand *nextUse = nullptr;
-
-  /// This points to the previous link in the use-chain.
-  IROperand **back = nullptr;
-
-  /// The owner of this operand, for example, the OperationStmt that contains a
-  /// StmtOperand.
-  IROperandOwner *const owner;
-
-  /// Operands are not copyable or assignable.
-  IROperand(const IROperand &use) = delete;
-  IROperand &operator=(const IROperand &use) = delete;
-
+  /// Remove this operand from the current use list.
   void removeFromCurrent() {
     if (!back)
       return;
@@ -187,97 +92,267 @@ private:
       nextUse->back = back;
   }
 
-  void insertIntoCurrent() {
-    back = &value->firstUse;
-    nextUse = value->firstUse;
+  /// Insert this operand into the given use list.
+  template <typename UseListT>
+  void insertInto(UseListT *useList) {
+    back = &useList->firstUse;
+    nextUse = useList->firstUse;
     if (nextUse)
       nextUse->back = &nextUse;
-    value->firstUse = this;
+    useList->firstUse = this;
   }
+
+  /// The next operand in the use-chain.
+  IROperandBase *nextUse = nullptr;
+
+  /// This points to the previous link in the use-chain.
+  IROperandBase **back = nullptr;
+
+private:
+  /// The operation owner of this operand.
+  Operation *const owner;
 };
+} // namespace detail
 
-/// A reference to a value, suitable for use as an operand of an instruction,
-/// statement, etc.  IRValueTy is the root type to use for values this tracks,
-/// and SSAUserTy is the type that will contain operands.
-template <typename IRValueTy, typename IROwnerTy>
-class IROperandImpl : public IROperand {
+//===----------------------------------------------------------------------===//
+// IROperand
+//===----------------------------------------------------------------------===//
+
+/// A reference to a value, suitable for use as an operand of an operation.
+/// IRValueT is the root type to use for values this tracks. Derived operand
+/// types are expected to provide the following:
+///  * static IRObjectWithUseList *getUseList(IRValueT value);
+///    - Provide the use list that is attached to the given value.
+template <typename DerivedT, typename IRValueT>
+class IROperand : public detail::IROperandBase {
 public:
-  IROperandImpl(IROwnerTy *owner) : IROperand(owner) {}
-  IROperandImpl(IROwnerTy *owner, IRValueTy *value) : IROperand(owner, value) {}
-
-  /// Return the current value being used by this operand.
-  IRValueTy *get() const { return (IRValueTy *)IROperand::get(); }
-
-  /// Set the current value being used by this operand.
-  void set(IRValueTy *newValue) { IROperand::set(newValue); }
-
-  /// Return the user that owns this use.
-  IROwnerTy *getOwner() { return (IROwnerTy *)IROperand::getOwner(); }
-  const IROwnerTy *getOwner() const {
-    return (IROwnerTy *)IROperand::getOwner();
+  IROperand(Operation *owner) : detail::IROperandBase(owner) {}
+  IROperand(Operation *owner, IRValueT value)
+      : detail::IROperandBase(owner), value(value) {
+    insertIntoCurrent();
   }
-
-  /// Return which operand this is in the operand list of the User.
-  unsigned getOperandNumber() const;
 
   /// We support a move constructor so IROperand's can be in vectors, but this
   /// shouldn't be used by general clients.
-  IROperandImpl(IROperandImpl &&other) : IROperand(std::move(other)) {}
+  IROperand(IROperand &&other) : detail::IROperandBase(std::move(other)) {
+    *this = std::move(other);
+  }
+  IROperand &operator=(IROperand &&other) {
+    detail::IROperandBase::operator=(std::move(other));
+    value = other.value;
+    other.value = nullptr;
+    if (value)
+      insertIntoCurrent();
+    return *this;
+  }
+
+  /// Two operands are equal if they have the same owner and the same operand
+  /// number. They are stored inside of ops, so it is valid to compare their
+  /// pointers to determine equality.
+  bool operator==(const IROperand<DerivedT, IRValueT> &other) const {
+    return this == &other;
+  }
+  bool operator!=(const IROperand<DerivedT, IRValueT> &other) const {
+    return !(*this == other);
+  }
+
+  /// Return the current value being used by this operand.
+  IRValueT get() const { return value; }
+
+  /// Set the current value being used by this operand.
+  void set(IRValueT newValue) {
+    // It isn't worth optimizing for the case of switching operands on a single
+    // value.
+    removeFromCurrent();
+    value = newValue;
+    insertIntoCurrent();
+  }
+
+  /// Returns true if this operand contains the given value.
+  bool is(IRValueT other) const { return value == other; }
+
+  /// \brief Remove this use of the operand.
+  void drop() {
+    detail::IROperandBase::drop();
+    value = nullptr;
+  }
+
+private:
+  /// The value used as this operand. This can be null when in a 'dropAllUses'
+  /// state.
+  IRValueT value = {};
+
+  /// Insert this operand into the given use list.
+  void insertIntoCurrent() { insertInto(DerivedT::getUseList(value)); }
 };
 
-/// An iterator over all uses of a ValueBase.
-template <typename OperandType, typename OwnerType>
-class SSAValueUseIterator
-    : public std::iterator<std::forward_iterator_tag, IROperand> {
+//===----------------------------------------------------------------------===//
+// IRObjectWithUseList
+//===----------------------------------------------------------------------===//
+
+/// This class represents a single IR object that contains a use list.
+template <typename OperandType>
+class IRObjectWithUseList {
 public:
-  SSAValueUseIterator() = default;
-  explicit SSAValueUseIterator(OperandType *current) : current(current) {}
-  OperandType *operator->() const { return current; }
-  OperandType &operator*() const { return *current; }
+  ~IRObjectWithUseList() {
+    assert(use_empty() && "Cannot destroy a value that still has uses!");
+  }
 
-  OwnerType *getUser() const { return current->getOwner(); }
+  /// Drop all uses of this object from their respective owners.
+  void dropAllUses() {
+    while (!use_empty())
+      use_begin()->drop();
+  }
 
-  SSAValueUseIterator &operator++() {
+  /// Replace all uses of 'this' value with the new value, updating anything in
+  /// the IR that uses 'this' to use the other value instead.  When this returns
+  /// there are zero uses of 'this'.
+  template <typename ValueT>
+  void replaceAllUsesWith(ValueT &&newValue) {
+    assert((!newValue || this != OperandType::getUseList(newValue)) &&
+           "cannot RAUW a value with itself");
+    while (!use_empty())
+      use_begin()->set(newValue);
+  }
+
+  /// Shuffle the use-list chain according to the provided indices vector, which
+  /// need to represent a valid shuffle. That is, a vector of unique integers in
+  /// range [0, numUses - 1]. Users of this function need to guarantee the
+  /// validity of the indices vector.
+  void shuffleUseList(ArrayRef<unsigned> indices) {
+    assert((size_t)std::distance(getUses().begin(), getUses().end()) ==
+               indices.size() &&
+           "indices vector expected to have a number of elements equal to the "
+           "number of uses");
+    SmallVector<detail::IROperandBase *> shuffled(indices.size());
+    detail::IROperandBase *ptr = firstUse;
+    for (size_t idx = 0; idx < indices.size();
+         idx++, ptr = ptr->getNextOperandUsingThisValue())
+      shuffled[indices[idx]] = ptr;
+
+    initFirstUse(shuffled.front());
+    auto *current = firstUse;
+    for (auto &next : llvm::drop_begin(shuffled)) {
+      current->linkTo(next);
+      current = next;
+    }
+    current->linkTo(nullptr);
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Uses
+  //===--------------------------------------------------------------------===//
+
+  using use_iterator = ValueUseIterator<OperandType>;
+  using use_range = iterator_range<use_iterator>;
+
+  use_iterator use_begin() const { return use_iterator(firstUse); }
+  use_iterator use_end() const { return use_iterator(nullptr); }
+
+  /// Returns a range of all uses, which is useful for iterating over all uses.
+  use_range getUses() const { return {use_begin(), use_end()}; }
+
+  /// Returns true if this value has exactly one use.
+  bool hasOneUse() const {
+    return firstUse && firstUse->getNextOperandUsingThisValue() == nullptr;
+  }
+
+  /// Returns true if this value has no uses.
+  bool use_empty() const { return firstUse == nullptr; }
+
+  //===--------------------------------------------------------------------===//
+  // Users
+  //===--------------------------------------------------------------------===//
+
+  using user_iterator = ValueUserIterator<use_iterator, OperandType>;
+  using user_range = iterator_range<user_iterator>;
+
+  user_iterator user_begin() const { return user_iterator(use_begin()); }
+  user_iterator user_end() const { return user_iterator(use_end()); }
+
+  /// Returns a range of all users.
+  user_range getUsers() const { return {user_begin(), user_end()}; }
+
+protected:
+  IRObjectWithUseList() = default;
+
+  /// Return the first operand that is using this value, for use by custom
+  /// use/def iterators.
+  OperandType *getFirstUse() const { return (OperandType *)firstUse; }
+
+private:
+  /// Set use as the first use of the chain.
+  void initFirstUse(detail::IROperandBase *use) {
+    firstUse = use;
+    firstUse->initChainWithUse(&firstUse);
+  }
+
+  detail::IROperandBase *firstUse = nullptr;
+
+  /// Allow access to `firstUse`.
+  friend detail::IROperandBase;
+};
+
+//===----------------------------------------------------------------------===//
+// ValueUseIterator
+//===----------------------------------------------------------------------===//
+
+/// An iterator class that allows for iterating over the uses of an IR operand
+/// type.
+template <typename OperandType>
+class ValueUseIterator
+    : public llvm::iterator_facade_base<ValueUseIterator<OperandType>,
+                                        std::forward_iterator_tag,
+                                        OperandType> {
+public:
+  ValueUseIterator(detail::IROperandBase *use = nullptr) : current(use) {}
+
+  /// Returns the operation that owns this use.
+  Operation *getUser() const { return current->getOwner(); }
+
+  /// Returns the current operands.
+  OperandType *getOperand() const { return (OperandType *)current; }
+  OperandType &operator*() const { return *getOperand(); }
+
+  using llvm::iterator_facade_base<ValueUseIterator<OperandType>,
+                                   std::forward_iterator_tag,
+                                   OperandType>::operator++;
+  ValueUseIterator &operator++() {
     assert(current && "incrementing past end()!");
     current = (OperandType *)current->getNextOperandUsingThisValue();
     return *this;
   }
 
-  SSAValueUseIterator operator++(int unused) {
-    SSAValueUseIterator copy = *this;
-    ++*this;
-    return copy;
+  bool operator==(const ValueUseIterator &rhs) const {
+    return current == rhs.current;
   }
 
-  friend bool operator==(SSAValueUseIterator lhs, SSAValueUseIterator rhs) {
-    return lhs.current == rhs.current;
-  }
-
-  friend bool operator!=(SSAValueUseIterator lhs, SSAValueUseIterator rhs) {
-    return !(lhs == rhs);
-  }
-
-private:
-  OperandType *current;
+protected:
+  detail::IROperandBase *current;
 };
 
-inline auto IRObjectWithUseList::use_begin() const -> use_iterator {
-  return use_iterator(firstUse);
-}
+//===----------------------------------------------------------------------===//
+// ValueUserIterator
+//===----------------------------------------------------------------------===//
 
-inline auto IRObjectWithUseList::use_end() const -> use_iterator {
-  return use_iterator(nullptr);
-}
+/// An iterator over the users of an IRObject. This is a wrapper iterator around
+/// a specific use iterator.
+template <typename UseIteratorT, typename OperandType>
+class ValueUserIterator final
+    : public llvm::mapped_iterator_base<
+          ValueUserIterator<UseIteratorT, OperandType>, UseIteratorT,
+          Operation *> {
+public:
+  using llvm::mapped_iterator_base<ValueUserIterator<UseIteratorT, OperandType>,
+                                   UseIteratorT,
+                                   Operation *>::mapped_iterator_base;
 
-inline auto IRObjectWithUseList::getUses() const
-    -> llvm::iterator_range<use_iterator> {
-  return {use_begin(), use_end()};
-}
+  /// Map the element to the iterator result type.
+  Operation *mapElement(OperandType &value) const { return value.getOwner(); }
 
-/// Returns true if this value has exactly one use.
-inline bool IRObjectWithUseList::hasOneUse() const {
-  return firstUse && firstUse->getNextOperandUsingThisValue() == nullptr;
-}
+  /// Provide access to the underlying operation.
+  Operation *operator->() { return **this; }
+};
 
 } // namespace mlir
 

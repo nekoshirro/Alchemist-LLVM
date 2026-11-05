@@ -1,178 +1,237 @@
 //===- Types.h - MLIR Type Classes ------------------------------*- C++ -*-===//
 //
-// Copyright 2019 The MLIR Authors.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 #ifndef MLIR_IR_TYPES_H
 #define MLIR_IR_TYPES_H
 
-#include "mlir/Support/LLVM.h"
+#include "mlir/IR/TypeSupport.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMapInfo.h"
+#include "llvm/Support/PointerLikeTypeTraits.h"
 
 namespace mlir {
-class AffineMap;
-class FloatType;
-class IndexType;
-class IntegerType;
-class Location;
-class MLIRContext;
-class OtherType;
+class AsmState;
 
-namespace detail {
-
-class TypeStorage;
-class IndexTypeStorage;
-class IntegerTypeStorage;
-class FloatTypeStorage;
-struct OtherTypeStorage;
-struct FunctionTypeStorage;
-struct VectorOrTensorTypeStorage;
-struct VectorTypeStorage;
-struct TensorTypeStorage;
-struct RankedTensorTypeStorage;
-struct UnrankedTensorTypeStorage;
-struct MemRefTypeStorage;
-
-} // namespace detail
-
-/// Instances of the Type class are immutable, uniqued, immortal, and owned by
-/// MLIRContext.  As such, they are passed around by raw non-const pointer.
+/// Instances of the Type class are uniqued, have an immutable identifier and an
+/// optional mutable component.  They wrap a pointer to the storage object owned
+/// by MLIRContext.  Therefore, instances of Type are passed around by value.
 ///
+/// Some types are "primitives" meaning they do not have any parameters, for
+/// example the Index type.  Parametric types have additional information that
+/// differentiates the types of the same class, for example the Integer type has
+/// bitwidth, making i8 and i16 belong to the same kind by be different
+/// instances of the IntegerType. Type parameters are part of the unique
+/// immutable key.  The mutable component of the type can be modified after the
+/// type is created, but cannot affect the identity of the type.
+///
+/// Types are constructed and uniqued via the 'detail::TypeUniquer' class.
+///
+/// Derived type classes are expected to implement several required
+/// implementation hooks:
+///  * Optional:
+///    - static LogicalResult verifyInvariants(
+///                                function_ref<InFlightDiagnostic()> emitError,
+///                                Args... args)
+///      * This method is invoked when calling the 'TypeBase::get/getChecked'
+///        methods to ensure that the arguments passed in are valid to construct
+///        a type instance with.
+///      * This method is expected to return failure if a type cannot be
+///        constructed with 'args', success otherwise.
+///      * 'args' must correspond with the arguments passed into the
+///        'TypeBase::get' call.
+///
+///
+/// Type storage objects inherit from TypeStorage and contain the following:
+///    - The dialect that defined the type.
+///    - Any parameters of the type.
+///    - An optional mutable component.
+/// For non-parametric types, a convenience DefaultTypeStorage is provided.
+/// Parametric storage types must derive TypeStorage and respect the following:
+///    - Define a type alias, KeyTy, to a type that uniquely identifies the
+///      instance of the type.
+///      * The key type must be constructible from the values passed into the
+///        detail::TypeUniquer::get call.
+///      * If the KeyTy does not have an llvm::DenseMapInfo specialization, the
+///        storage class must define a hashing method:
+///         'static unsigned hashKey(const KeyTy &)'
+///
+///    - Provide a method, 'bool operator==(const KeyTy &) const', to
+///      compare the storage instance against an instance of the key type.
+///
+///    - Provide a static construction method:
+///        'DerivedStorage *construct(TypeStorageAllocator &, const KeyTy &key)'
+///      that builds a unique instance of the derived storage. The arguments to
+///      this function are an allocator to store any uniqued data within the
+///      context and the key type for this storage.
+///
+///    - If they have a mutable component, this component must not be a part of
+///      the key.
 class Type {
 public:
-  /// Integer identifier for all the concrete type kinds.
-  enum class Kind {
-    // Target pointer sized integer, used (e.g.) in affine mappings.
-    Index,
+  /// Utility class for implementing types.
+  template <typename ConcreteType, typename BaseType, typename StorageType,
+            template <typename T> class... Traits>
+  using TypeBase = detail::StorageUserBase<ConcreteType, BaseType, StorageType,
+                                           detail::TypeUniquer, Traits...>;
 
-    // TensorFlow types.
-    TFControl,
-    TFResource,
-    TFVariant,
-    TFComplex64,
-    TFComplex128,
-    TFF32REF,
-    TFString,
+  using ImplType = TypeStorage;
 
-    /// These are marker for the first and last 'other' type.
-    FIRST_OTHER_TYPE = TFControl,
-    LAST_OTHER_TYPE = TFString,
+  using AbstractTy = AbstractType;
 
-    // Floating point.
-    BF16,
-    F16,
-    F32,
-    F64,
-    FIRST_FLOATING_POINT_TYPE = BF16,
-    LAST_FLOATING_POINT_TYPE = F64,
+  constexpr Type() = default;
+  /* implicit */ Type(const ImplType *impl)
+      : impl(const_cast<ImplType *>(impl)) {}
 
-    // Derived types.
-    Integer,
-    Function,
-    Vector,
-    RankedTensor,
-    UnrankedTensor,
-    MemRef,
-  };
+  Type(const Type &other) = default;
+  Type &operator=(const Type &other) = default;
 
-  using ImplType = detail::TypeStorage;
-
-  Type() : type(nullptr) {}
-  /* implicit */ Type(const ImplType *type)
-      : type(const_cast<ImplType *>(type)) {}
-
-  Type(const Type &other) : type(other.type) {}
-  Type &operator=(Type other) {
-    type = other.type;
-    return *this;
-  }
-
-  bool operator==(Type other) const { return type == other.type; }
+  bool operator==(Type other) const { return impl == other.impl; }
   bool operator!=(Type other) const { return !(*this == other); }
-  explicit operator bool() const { return type; }
+  explicit operator bool() const { return impl; }
 
-  bool operator!() const { return type == nullptr; }
+  bool operator!() const { return impl == nullptr; }
 
-  template <typename U> bool isa() const;
-  template <typename U> U dyn_cast() const;
-  template <typename U> U dyn_cast_or_null() const;
-  template <typename U> U cast() const;
+  /// Return a unique identifier for the concrete type. This is used to support
+  /// dynamic type casting.
+  TypeID getTypeID() { return impl->getAbstractType().getTypeID(); }
 
-  /// Return the classification for this type.
-  Kind getKind() const;
-
-  /// Return the LLVMContext in which this type was uniqued.
+  /// Return the MLIRContext in which this type was uniqued.
   MLIRContext *getContext() const;
 
-  // Convenience predicates.  This is only for 'other' and floating point types,
+  /// Get the dialect this type is registered to.
+  Dialect &getDialect() const { return impl->getAbstractType().getDialect(); }
+
+  // Convenience predicates.  This is only for floating point types,
   // derived types should use isa/dyn_cast.
-  bool isIndex() const { return getKind() == Kind::Index; }
-  bool isTFControl() const { return getKind() == Kind::TFControl; }
-  bool isTFResource() const { return getKind() == Kind::TFResource; }
-  bool isTFVariant() const { return getKind() == Kind::TFVariant; }
-  bool isTFComplex64() const { return getKind() == Kind::TFComplex64; }
-  bool isTFComplex128() const { return getKind() == Kind::TFComplex128; }
-  bool isTFF32REF() const { return getKind() == Kind::TFF32REF; }
-  bool isTFString() const { return getKind() == Kind::TFString; }
-  bool isBF16() const { return getKind() == Kind::BF16; }
-  bool isF16() const { return getKind() == Kind::F16; }
-  bool isF32() const { return getKind() == Kind::F32; }
-  bool isF64() const { return getKind() == Kind::F64; }
+  bool isIndex() const;
+  bool isBF16() const;
+  bool isF16() const;
+  bool isTF32() const;
+  bool isF32() const;
+  bool isF64() const;
+  bool isF80() const;
+  bool isF128() const;
+  /// Return true if this is an float type (with the specified width).
+  bool isFloat() const;
+  bool isFloat(unsigned width) const;
 
-  /// Return true if this is an integer type with the specified width.
+  /// Return true if this is an integer type (with the specified width).
+  bool isInteger() const;
   bool isInteger(unsigned width) const;
+  /// Return true if this is a signless integer type (with the specified width).
+  bool isSignlessInteger() const;
+  bool isSignlessInteger(unsigned width) const;
+  /// Return true if this is a signed integer type (with the specified width).
+  bool isSignedInteger() const;
+  bool isSignedInteger(unsigned width) const;
+  /// Return true if this is an unsigned integer type (with the specified
+  /// width).
+  bool isUnsignedInteger() const;
+  bool isUnsignedInteger(unsigned width) const;
 
-  /// Return the bitwidth of this type. For vector or tensor types, returns the
-  /// element type's bitwidth.
-  unsigned getBitWidth() const;
+  /// Return the bit width of an integer or a float type, assert failure on
+  /// other types.
+  unsigned getIntOrFloatBitWidth() const;
 
-  // Convenience factories.
-  static IndexType getIndex(MLIRContext *ctx);
-  static IntegerType getInteger(unsigned width, MLIRContext *ctx);
-  static FloatType getBF16(MLIRContext *ctx);
-  static FloatType getF16(MLIRContext *ctx);
-  static FloatType getF32(MLIRContext *ctx);
-  static FloatType getF64(MLIRContext *ctx);
-  static OtherType getTFControl(MLIRContext *ctx);
-  static OtherType getTFString(MLIRContext *ctx);
-  static OtherType getTFResource(MLIRContext *ctx);
-  static OtherType getTFVariant(MLIRContext *ctx);
-  static OtherType getTFComplex64(MLIRContext *ctx);
-  static OtherType getTFComplex128(MLIRContext *ctx);
-  static OtherType getTFF32REF(MLIRContext *ctx);
+  /// Return true if this is a signless integer or index type.
+  bool isSignlessIntOrIndex() const;
+  /// Return true if this is a signless integer, index, or float type.
+  bool isSignlessIntOrIndexOrFloat() const;
+  /// Return true of this is a signless integer or a float type.
+  bool isSignlessIntOrFloat() const;
+
+  /// Return true if this is an integer (of any signedness) or an index type.
+  bool isIntOrIndex() const;
+  /// Return true if this is an integer (of any signedness) or a float type.
+  bool isIntOrFloat() const;
+  /// Return true if this is an integer (of any signedness), index, or float
+  /// type.
+  bool isIntOrIndexOrFloat() const;
 
   /// Print the current type.
   void print(raw_ostream &os) const;
+  void print(raw_ostream &os, AsmState &state) const;
   void dump() const;
 
   friend ::llvm::hash_code hash_value(Type arg);
 
-  unsigned getSubclassData() const;
-  void setSubclassData(unsigned val);
-
   /// Methods for supporting PointerLikeTypeTraits.
   const void *getAsOpaquePointer() const {
-    return static_cast<const void *>(type);
+    return static_cast<const void *>(impl);
   }
   static Type getFromOpaquePointer(const void *pointer) {
-    return Type((ImplType *)(pointer));
+    return Type(reinterpret_cast<ImplType *>(const_cast<void *>(pointer)));
+  }
+
+  /// Returns true if `InterfaceT` has been promised by the dialect or
+  /// implemented.
+  template <typename InterfaceT>
+  bool hasPromiseOrImplementsInterface() {
+    return dialect_extension_detail::hasPromisedInterface(
+               getDialect(), getTypeID(), InterfaceT::getInterfaceID()) ||
+           mlir::isa<InterfaceT>(*this);
+  }
+
+  /// Returns true if the type was registered with a particular trait.
+  template <template <typename T> class Trait>
+  bool hasTrait() {
+    return getAbstractType().hasTrait<Trait>();
+  }
+
+  /// Return the abstract type descriptor for this type.
+  const AbstractTy &getAbstractType() const { return impl->getAbstractType(); }
+
+  /// Return the Type implementation.
+  ImplType *getImpl() const { return impl; }
+
+  /// Walk all of the immediately nested sub-attributes and sub-types. This
+  /// method does not recurse into sub elements.
+  void walkImmediateSubElements(function_ref<void(Attribute)> walkAttrsFn,
+                                function_ref<void(Type)> walkTypesFn) const {
+    getAbstractType().walkImmediateSubElements(*this, walkAttrsFn, walkTypesFn);
+  }
+
+  /// Replace the immediately nested sub-attributes and sub-types with those
+  /// provided. The order of the provided elements is derived from the order of
+  /// the elements returned by the callbacks of `walkImmediateSubElements`. The
+  /// element at index 0 would replace the very first attribute given by
+  /// `walkImmediateSubElements`. On success, the new instance with the values
+  /// replaced is returned. If replacement fails, nullptr is returned.
+  auto replaceImmediateSubElements(ArrayRef<Attribute> replAttrs,
+                                   ArrayRef<Type> replTypes) const {
+    return getAbstractType().replaceImmediateSubElements(*this, replAttrs,
+                                                         replTypes);
+  }
+
+  /// Walk this type and all attibutes/types nested within using the
+  /// provided walk functions. See `AttrTypeWalker` for information on the
+  /// supported walk function types.
+  template <WalkOrder Order = WalkOrder::PostOrder, typename... WalkFns>
+  auto walk(WalkFns &&...walkFns) {
+    AttrTypeWalker walker;
+    (walker.addWalk(std::forward<WalkFns>(walkFns)), ...);
+    return walker.walk<Order>(*this);
+  }
+
+  /// Recursively replace all of the nested sub-attributes and sub-types using
+  /// the provided map functions. Returns nullptr in the case of failure. See
+  /// `AttrTypeReplacer` for information on the support replacement function
+  /// types.
+  template <typename... ReplacementFns>
+  auto replace(ReplacementFns &&...replacementFns) {
+    AttrTypeReplacer replacer;
+    (replacer.addReplacement(std::forward<ReplacementFns>(replacementFns)),
+     ...);
+    return replacer.replace(*this);
   }
 
 protected:
-  ImplType *type;
+  ImplType *impl{nullptr};
 };
 
 inline raw_ostream &operator<<(raw_ostream &os, Type type) {
@@ -180,398 +239,105 @@ inline raw_ostream &operator<<(raw_ostream &os, Type type) {
   return os;
 }
 
-/// Integer types can have arbitrary bitwidth up to a large fixed limit.
-class IntegerType : public Type {
+//===----------------------------------------------------------------------===//
+// TypeTraitBase
+//===----------------------------------------------------------------------===//
+
+namespace TypeTrait {
+/// This class represents the base of a type trait.
+template <typename ConcreteType, template <typename> class TraitType>
+using TraitBase = detail::StorageUserTraitBase<ConcreteType, TraitType>;
+} // namespace TypeTrait
+
+//===----------------------------------------------------------------------===//
+// TypeInterface
+//===----------------------------------------------------------------------===//
+
+/// This class represents the base of a type interface. See the definition  of
+/// `detail::Interface` for requirements on the `Traits` type.
+template <typename ConcreteType, typename Traits>
+class TypeInterface : public detail::Interface<ConcreteType, Type, Traits, Type,
+                                               TypeTrait::TraitBase> {
 public:
-  using ImplType = detail::IntegerTypeStorage;
-  IntegerType() = default;
-  /* implicit */ IntegerType(Type::ImplType *ptr);
+  using Base = TypeInterface<ConcreteType, Traits>;
+  using InterfaceBase =
+      detail::Interface<ConcreteType, Type, Traits, Type, TypeTrait::TraitBase>;
+  using InterfaceBase::InterfaceBase;
 
-  /// Get or create a new IntegerType of the given width within the context.
-  /// Assume the width is within the allowed range and assert on failures.
-  /// Use getChecked to handle failures gracefully.
-  static IntegerType get(unsigned width, MLIRContext *context);
+protected:
+  /// Returns the impl interface instance for the given type.
+  static typename InterfaceBase::Concept *getInterfaceFor(Type type) {
+#ifndef NDEBUG
+    // Check that the current interface isn't an unresolved promise for the
+    // given type.
+    dialect_extension_detail::handleUseOfUndefinedPromisedInterface(
+        type.getDialect(), type.getTypeID(), ConcreteType::getInterfaceID(),
+        llvm::getTypeName<ConcreteType>());
+#endif
 
-  /// Get or create a new IntegerType of the given width within the context,
-  /// defined at the given, potentially unknown, location.  If the width is
-  /// outside the allowed range, emit errors and return a null type.
-  static IntegerType getChecked(unsigned width, MLIRContext *context,
-                                Location location);
-
-  /// Return the bitwidth of this integer type.
-  unsigned getWidth() const;
-
-  /// Methods for support type inquiry through isa, cast, and dyn_cast.
-  static bool kindof(Kind kind) { return kind == Kind::Integer; }
-
-  /// Integer representation maximal bitwidth.
-  static constexpr unsigned kMaxWidth = 4096;
-};
-
-inline IntegerType Type::getInteger(unsigned width, MLIRContext *ctx) {
-  return IntegerType::get(width, ctx);
-}
-
-/// Return true if this is an integer type with the specified width.
-inline bool Type::isInteger(unsigned width) const {
-  if (auto intTy = dyn_cast<IntegerType>())
-    return intTy.getWidth() == width;
-  return false;
-}
-
-class FloatType : public Type {
-public:
-  using ImplType = detail::FloatTypeStorage;
-  FloatType() = default;
-  /* implicit */ FloatType(Type::ImplType *ptr);
-
-  static FloatType get(Kind kind, MLIRContext *context);
-
-  /// Methods for support type inquiry through isa, cast, and dyn_cast.
-  static bool kindof(Kind kind) {
-    return kind >= Kind::FIRST_FLOATING_POINT_TYPE &&
-           kind <= Kind::LAST_FLOATING_POINT_TYPE;
-  }
-};
-
-inline FloatType Type::getBF16(MLIRContext *ctx) {
-  return FloatType::get(Kind::BF16, ctx);
-}
-inline FloatType Type::getF16(MLIRContext *ctx) {
-  return FloatType::get(Kind::F16, ctx);
-}
-inline FloatType Type::getF32(MLIRContext *ctx) {
-  return FloatType::get(Kind::F32, ctx);
-}
-inline FloatType Type::getF64(MLIRContext *ctx) {
-  return FloatType::get(Kind::F64, ctx);
-}
-
-/// Index is special integer-like type with unknown platform-dependent bit width
-/// used in subscripts and loop induction variables.
-class IndexType : public Type {
-public:
-  using ImplType = detail::IndexTypeStorage;
-  IndexType() = default;
-  /* implicit */ IndexType(Type::ImplType *ptr);
-
-  /// Crete an IndexType instance, unique in the given context.
-  static IndexType get(MLIRContext *context);
-
-  /// Support method to enable LLVM-style type casting.
-  static bool kindof(Kind kind) { return kind == Kind::Index; }
-};
-
-/// This is a type for the random collection of special base types.
-class OtherType : public Type {
-public:
-  using ImplType = detail::OtherTypeStorage;
-  OtherType() = default;
-  /* implicit */ OtherType(Type::ImplType *ptr);
-
-  static OtherType get(Kind kind, MLIRContext *context);
-
-  /// Methods for support type inquiry through isa, cast, and dyn_cast.
-  static bool kindof(Kind kind) {
-    return kind >= Kind::FIRST_OTHER_TYPE && kind <= Kind::LAST_OTHER_TYPE;
-  }
-};
-
-inline IndexType Type::getIndex(MLIRContext *ctx) {
-  return IndexType::get(ctx);
-}
-inline OtherType Type::getTFControl(MLIRContext *ctx) {
-  return OtherType::get(Kind::TFControl, ctx);
-}
-inline OtherType Type::getTFResource(MLIRContext *ctx) {
-  return OtherType::get(Kind::TFResource, ctx);
-}
-inline OtherType Type::getTFString(MLIRContext *ctx) {
-  return OtherType::get(Kind::TFString, ctx);
-}
-inline OtherType Type::getTFVariant(MLIRContext *ctx) {
-  return OtherType::get(Kind::TFVariant, ctx);
-}
-inline OtherType Type::getTFComplex64(MLIRContext *ctx) {
-  return OtherType::get(Kind::TFComplex64, ctx);
-}
-inline OtherType Type::getTFComplex128(MLIRContext *ctx) {
-  return OtherType::get(Kind::TFComplex128, ctx);
-}
-inline OtherType Type::getTFF32REF(MLIRContext *ctx) {
-  return OtherType::get(Kind::TFF32REF, ctx);
-}
-
-/// Function types map from a list of inputs to a list of results.
-class FunctionType : public Type {
-public:
-  using ImplType = detail::FunctionTypeStorage;
-  FunctionType() = default;
-  /* implicit */ FunctionType(Type::ImplType *ptr);
-
-  static FunctionType get(ArrayRef<Type> inputs, ArrayRef<Type> results,
-                          MLIRContext *context);
-
-  // Input types.
-  unsigned getNumInputs() const { return getSubclassData(); }
-
-  Type getInput(unsigned i) const { return getInputs()[i]; }
-
-  ArrayRef<Type> getInputs() const;
-
-  // Result types.
-  unsigned getNumResults() const;
-
-  Type getResult(unsigned i) const { return getResults()[i]; }
-
-  ArrayRef<Type> getResults() const;
-
-  /// Methods for support type inquiry through isa, cast, and dyn_cast.
-  static bool kindof(Kind kind) { return kind == Kind::Function; }
-};
-
-/// This is a common base class between Vector, UnrankedTensor, and RankedTensor
-/// types, because many operations work on values of these aggregate types.
-class VectorOrTensorType : public Type {
-public:
-  using ImplType = detail::VectorOrTensorTypeStorage;
-  VectorOrTensorType() = default;
-  /* implicit */ VectorOrTensorType(Type::ImplType *ptr);
-
-  Type getElementType() const;
-
-  /// If this is ranked tensor or vector type, return the number of elements. If
-  /// it is an unranked tensor, abort.
-  unsigned getNumElements() const;
-
-  /// If this is ranked tensor or vector type, return the rank. If it is an
-  /// unranked tensor, return -1.
-  int getRank() const;
-
-  /// If this is ranked tensor or vector type, return the shape. If it is an
-  /// unranked tensor, abort.
-  ArrayRef<int> getShape() const;
-
-  /// If this is unranked tensor or any dimension has unknown size (<0),
-  /// it doesn't have static shape. If all dimensions have known size (>= 0),
-  /// it has static shape.
-  bool hasStaticShape() const;
-
-  /// If this is ranked tensor or vector type, return the size of the specified
-  /// dimension. It aborts if the tensor is unranked (this can be checked by
-  /// the getRank call method).
-  int getDimSize(unsigned i) const;
-
-  /// Methods for support type inquiry through isa, cast, and dyn_cast.
-  static bool kindof(Kind kind) {
-    return kind == Kind::Vector || kind == Kind::RankedTensor ||
-           kind == Kind::UnrankedTensor;
-  }
-};
-
-/// Vector types represent multi-dimensional SIMD vectors, and have a fixed
-/// known constant shape with one or more dimension.
-class VectorType : public VectorOrTensorType {
-public:
-  using ImplType = detail::VectorTypeStorage;
-  VectorType() = default;
-  /* implicit */ VectorType(Type::ImplType *ptr);
-
-  /// Get or create a new VectorType of the provided shape and element type.
-  /// Assumes the arguments define a well-formed VectorType.
-  static VectorType get(ArrayRef<int> shape, Type elementType);
-
-  /// Get or create a new VectorType of the provided shape and element type
-  /// declared at the given, potentially unknown, location.  If the VectorType
-  /// defined by the arguments would be ill-formed, emit errors and return
-  /// nullptr-wrapping type.
-  static VectorType getChecked(ArrayRef<int> shape, Type elementType,
-                               Location location);
-
-  /// Returns true of the given type can be used as an element of a vector type.
-  /// In particular, vectors can consist of integer or float primitives.
-  static bool isValidElementType(Type t) {
-    return t.isa<IntegerType>() || t.isa<FloatType>() || t.isa<IndexType>();
+    return type.getAbstractType().getInterface<ConcreteType>();
   }
 
-  ArrayRef<int> getShape() const;
-
-  /// Methods for support type inquiry through isa, cast, and dyn_cast.
-  static bool kindof(Kind kind) { return kind == Kind::Vector; }
+  /// Allow access to 'getInterfaceFor'.
+  friend InterfaceBase;
 };
 
-/// Tensor types represent multi-dimensional arrays, and have two variants:
-/// RankedTensorType and UnrankedTensorType.
-class TensorType : public VectorOrTensorType {
-public:
-  using ImplType = detail::TensorTypeStorage;
-  TensorType() = default;
-  /* implicit */ TensorType(Type::ImplType *ptr);
+//===----------------------------------------------------------------------===//
+// Core TypeTrait
+//===----------------------------------------------------------------------===//
 
-  /// Return true if the specified element type is a TensorFlow type that is ok
-  /// in a tensor.
-  static bool isValidTFElementType(Type type) {
-    return type.isa<FloatType>() || type.isa<IntegerType>() ||
-           type.isa<OtherType>();
-  }
+/// This trait is used to determine if a type is mutable or not. It is attached
+/// on a type if the corresponding ImplType defines a `mutate` function with
+/// a proper signature.
+namespace TypeTrait {
+template <typename ConcreteType>
+using IsMutable = detail::StorageUserTrait::IsMutable<ConcreteType>;
+} // namespace TypeTrait
 
-  /// Return true if the specified element type is ok in a tensor.
-  static bool isValidElementType(Type type) {
-    return isValidTFElementType(type) || type.isa<VectorType>() ||
-           type.isa<IndexType>();
-  }
-
-  /// Methods for support type inquiry through isa, cast, and dyn_cast.
-  static bool kindof(Kind kind) {
-    return kind == Kind::RankedTensor || kind == Kind::UnrankedTensor;
-  }
-};
-
-/// Ranked tensor types represent multi-dimensional arrays that have a shape
-/// with a fixed number of dimensions. Each shape element can be a positive
-/// integer or unknown (represented -1).
-class RankedTensorType : public TensorType {
-public:
-  using ImplType = detail::RankedTensorTypeStorage;
-  RankedTensorType() = default;
-  /* implicit */ RankedTensorType(Type::ImplType *ptr);
-
-  /// Get or create a new RankedTensorType of the provided shape and element
-  /// type. Assumes the arguments define a well-formed type.
-  static RankedTensorType get(ArrayRef<int> shape, Type elementType);
-
-  /// Get or create a new RankedTensorType of the provided shape and element
-  /// type declared at the given, potentially unknown, location.  If the
-  /// RankedTensorType defined by the arguments would be ill-formed, emit errors
-  /// and return a nullptr-wrapping type.
-  static RankedTensorType getChecked(ArrayRef<int> shape, Type elementType,
-                                     Location location);
-
-  ArrayRef<int> getShape() const;
-
-  static bool kindof(Kind kind) { return kind == Kind::RankedTensor; }
-};
-
-/// Unranked tensor types represent multi-dimensional arrays that have an
-/// unknown shape.
-class UnrankedTensorType : public TensorType {
-public:
-  using ImplType = detail::UnrankedTensorTypeStorage;
-  UnrankedTensorType() = default;
-  /* implicit */ UnrankedTensorType(Type::ImplType *ptr);
-
-  /// Get or create a new UnrankedTensorType of the provided shape and element
-  /// type. Assumes the arguments define a well-formed type.
-  static UnrankedTensorType get(Type elementType);
-
-  /// Get or create a new UnrankedTensorType of the provided shape and element
-  /// type declared at the given, potentially unknown, location.  If the
-  /// UnrankedTensorType defined by the arguments would be ill-formed, emit
-  /// errors and return a nullptr-wrapping type.
-  static UnrankedTensorType getChecked(Type elementType, Location location);
-
-  ArrayRef<int> getShape() const { return ArrayRef<int>(); }
-
-  static bool kindof(Kind kind) { return kind == Kind::UnrankedTensor; }
-};
-
-/// MemRef types represent a region of memory that have a shape with a fixed
-/// number of dimensions. Each shape element can be a positive integer or
-/// unknown (represented by any negative integer). MemRef types also have an
-/// affine map composition, represented as an array AffineMap pointers.
-class MemRefType : public Type {
-public:
-  using ImplType = detail::MemRefTypeStorage;
-  MemRefType() = default;
-  /* implicit */ MemRefType(Type::ImplType *ptr);
-
-  /// Get or create a new MemRefType based on shape, element type, affine
-  /// map composition, and memory space.  Assumes the arguments define a
-  /// well-formed MemRef type.  Use getChecked to gracefully handle MemRefType
-  /// construction failures.
-  static MemRefType get(ArrayRef<int> shape, Type elementType,
-                        ArrayRef<AffineMap> affineMapComposition,
-                        unsigned memorySpace);
-
-  /// Get or create a new MemRefType based on shape, element type, affine
-  /// map composition, and memory space declared at the given location.
-  /// If the location is unknown, the last argument should be an instance of
-  /// UnknownLoc.  If the MemRefType defined by the arguments would be
-  /// ill-formed, emits errors (to the handler registered with the context or to
-  /// the error stream) and returns nullptr.
-  static MemRefType getChecked(ArrayRef<int> shape, Type elementType,
-                               ArrayRef<AffineMap> affineMapComposition,
-                               unsigned memorySpace, Location location);
-
-  unsigned getRank() const { return getShape().size(); }
-
-  /// Returns an array of memref shape dimension sizes.
-  ArrayRef<int> getShape() const;
-
-  /// Return the size of the specified dimension, or -1 if unspecified.
-  int getDimSize(unsigned i) const { return getShape()[i]; }
-
-  /// Returns the elemental type for this memref shape.
-  Type getElementType() const;
-
-  /// Returns an array of affine map pointers representing the memref affine
-  /// map composition.
-  ArrayRef<AffineMap> getAffineMaps() const;
-
-  /// Returns the memory space in which data referred to by this memref resides.
-  unsigned getMemorySpace() const;
-
-  /// Returns the number of dimensions with dynamic size.
-  unsigned getNumDynamicDims() const;
-
-  static bool kindof(Kind kind) { return kind == Kind::MemRef; }
-
-private:
-  static MemRefType getSafe(ArrayRef<int> shape, Type elementType,
-                            ArrayRef<AffineMap> affineMapComposition,
-                            unsigned memorySpace, Optional<Location> location);
-};
+//===----------------------------------------------------------------------===//
+// Type Utils
+//===----------------------------------------------------------------------===//
 
 // Make Type hashable.
 inline ::llvm::hash_code hash_value(Type arg) {
-  return ::llvm::hash_value(arg.type);
+  return DenseMapInfo<const Type::ImplType *>::getHashValue(arg.impl);
 }
 
-template <typename U> bool Type::isa() const {
-  assert(type && "isa<> used on a null type.");
-  return U::kindof(getKind());
-}
-template <typename U> U Type::dyn_cast() const {
-  return isa<U>() ? U(type) : U(nullptr);
-}
-template <typename U> U Type::dyn_cast_or_null() const {
-  return (type && isa<U>()) ? U(type) : U(nullptr);
-}
-template <typename U> U Type::cast() const {
-  assert(isa<U>());
-  return U(type);
-}
-
-} // end namespace mlir
+} // namespace mlir
 
 namespace llvm {
 
 // Type hash just like pointers.
-template <> struct DenseMapInfo<mlir::Type> {
+template <>
+struct DenseMapInfo<mlir::Type> {
   static mlir::Type getEmptyKey() {
-    auto pointer = llvm::DenseMapInfo<void *>::getEmptyKey();
+    auto *pointer = llvm::DenseMapInfo<void *>::getEmptyKey();
     return mlir::Type(static_cast<mlir::Type::ImplType *>(pointer));
   }
   static mlir::Type getTombstoneKey() {
-    auto pointer = llvm::DenseMapInfo<void *>::getTombstoneKey();
+    auto *pointer = llvm::DenseMapInfo<void *>::getTombstoneKey();
     return mlir::Type(static_cast<mlir::Type::ImplType *>(pointer));
   }
   static unsigned getHashValue(mlir::Type val) { return mlir::hash_value(val); }
   static bool isEqual(mlir::Type LHS, mlir::Type RHS) { return LHS == RHS; }
 };
+template <typename T>
+struct DenseMapInfo<T, std::enable_if_t<std::is_base_of<mlir::Type, T>::value &&
+                                        !mlir::detail::IsInterface<T>::value>>
+    : public DenseMapInfo<mlir::Type> {
+  static T getEmptyKey() {
+    const void *pointer = llvm::DenseMapInfo<const void *>::getEmptyKey();
+    return T::getFromOpaquePointer(pointer);
+  }
+  static T getTombstoneKey() {
+    const void *pointer = llvm::DenseMapInfo<const void *>::getTombstoneKey();
+    return T::getFromOpaquePointer(pointer);
+  }
+};
 
 /// We align TypeStorage by 8, so allow LLVM to steal the low bits.
-template <> struct PointerLikeTypeTraits<mlir::Type> {
+template <>
+struct PointerLikeTypeTraits<mlir::Type> {
 public:
   static inline void *getAsVoidPointer(mlir::Type I) {
     return const_cast<void *>(I.getAsOpaquePointer());
@@ -579,9 +345,38 @@ public:
   static inline mlir::Type getFromVoidPointer(void *P) {
     return mlir::Type::getFromOpaquePointer(P);
   }
-  enum { NumLowBitsAvailable = 3 };
+  static constexpr int NumLowBitsAvailable = 3;
+};
+
+/// Add support for llvm style casts.
+/// We provide a cast between To and From if From is mlir::Type or derives from
+/// it
+template <typename To, typename From>
+struct CastInfo<
+    To, From,
+    std::enable_if_t<std::is_same_v<mlir::Type, std::remove_const_t<From>> ||
+                     std::is_base_of_v<mlir::Type, From>>>
+    : NullableValueCastFailed<To>,
+      DefaultDoCastIfPossible<To, From, CastInfo<To, From>> {
+  /// Arguments are taken as mlir::Type here and not as `From`, because when
+  /// casting from an intermediate type of the hierarchy to one of its children,
+  /// the val.getTypeID() inside T::classof will use the static getTypeID of the
+  /// parent instead of the non-static Type::getTypeID that returns the dynamic
+  /// ID. This means that T::classof would end up comparing the static TypeID of
+  /// the children to the static TypeID of its parent, making it impossible to
+  /// downcast from the parent to the child.
+  static inline bool isPossible(mlir::Type ty) {
+    /// Return a constant true instead of a dynamic true when casting to self or
+    /// up the hierarchy.
+    if constexpr (std::is_base_of_v<To, From>) {
+      return true;
+    } else {
+      return To::classof(ty);
+    };
+  }
+  static inline To doCast(mlir::Type ty) { return To(ty.getImpl()); }
 };
 
 } // namespace llvm
 
-#endif  // MLIR_IR_TYPES_H
+#endif // MLIR_IR_TYPES_H
